@@ -1,0 +1,10 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+requests==2.32.3
+streamlit==1.38.0
+pandas==2.2.2
+plotly==5.24.0
+pydantic==2.9.1
+PyYAML==6.0.2

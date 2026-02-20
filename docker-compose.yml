@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    container_name: osint-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./database:/app/database
+      - ./config:/app/config
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    container_name: osint-dashboard
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    volumes:
+      - ./database:/app/database
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    restart: unless-stopped
+
+  scraper:
+    build: .
+    container_name: osint-scraper
+    volumes:
+      - ./database:/app/database
+      - ./config:/app/config
+    command: python scraper/run_all.py
+    profiles:
+      - scrape

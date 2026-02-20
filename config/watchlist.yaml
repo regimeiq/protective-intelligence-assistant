@@ -1,0 +1,57 @@
+keywords:
+  threat_actors:
+    - "APT"
+    - "threat actor"
+    - "nation state"
+    - "advanced persistent threat"
+
+  malware:
+    - "ransomware"
+    - "malware"
+    - "trojan"
+    - "botnet"
+    - "spyware"
+
+  vulnerabilities:
+    - "zero day"
+    - "CVE"
+    - "exploitation"
+    - "remote code execution"
+    - "privilege escalation"
+
+  general:
+    - "data breach"
+    - "credential leak"
+    - "phishing"
+    - "DDoS"
+    - "supply chain attack"
+    - "insider threat"
+    - "cryptocurrency fraud"
+    - "dark web"
+    - "critical infrastructure"
+    - "election interference"
+
+sources:
+  rss:
+    - name: "CISA Alerts"
+      url: "https://www.cisa.gov/news.xml"
+    - name: "Krebs on Security"
+      url: "https://krebsonsecurity.com/feed/"
+    - name: "BleepingComputer"
+      url: "https://www.bleepingcomputer.com/feed/"
+    - name: "The Hacker News"
+      url: "https://feeds.feedburner.com/TheHackersNews"
+    - name: "Dark Reading"
+      url: "https://www.darkreading.com/rss.xml"
+
+  reddit:
+    - name: "r/cybersecurity"
+      url: "https://www.reddit.com/r/cybersecurity/.rss"
+    - name: "r/netsec"
+      url: "https://www.reddit.com/r/netsec/.rss"
+    - name: "r/threatintel"
+      url: "https://www.reddit.com/r/threatintel/.rss"
+
+  pastebin:
+    - name: "Pastebin Archive"
+      url: "https://pastebin.com/archive"
