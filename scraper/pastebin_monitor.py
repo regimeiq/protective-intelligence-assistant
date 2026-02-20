@@ -2,7 +2,8 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from database.init_db import get_connection
-from scraper.rss_scraper import match_keywords, get_active_keywords, alert_exists, assign_severity
+from scraper.rss_scraper import match_keywords, get_active_keywords, alert_exists
+from analytics.risk_scoring import increment_keyword_frequency, score_alert
 
 PASTEBIN_ARCHIVE_URL = "https://pastebin.com/archive"
 
@@ -69,8 +70,8 @@ def ensure_pastebin_source(conn):
         return row["id"]
 
     conn.execute(
-        "INSERT INTO sources (name, url, source_type) VALUES (?, ?, ?)",
-        ("Pastebin Archive", PASTEBIN_ARCHIVE_URL, "pastebin"),
+        "INSERT INTO sources (name, url, source_type, credibility_score) VALUES (?, ?, ?, ?)",
+        ("Pastebin Archive", PASTEBIN_ARCHIVE_URL, "pastebin", 0.2),
     )
     conn.commit()
     cursor = conn.execute(
@@ -98,10 +99,9 @@ def run_pastebin_scraper():
 
         for keyword in matches:
             if not alert_exists(conn, source_id, keyword["id"], paste["url"]):
-                severity = assign_severity(keyword["category"], len(matches))
                 conn.execute(
-                    """INSERT INTO alerts 
-                       (source_id, keyword_id, title, content, url, matched_term, severity) 
+                    """INSERT INTO alerts
+                       (source_id, keyword_id, title, content, url, matched_term, severity)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (
                         source_id,
@@ -110,9 +110,12 @@ def run_pastebin_scraper():
                         content[:2000],
                         paste["url"],
                         keyword["term"],
-                        severity,
+                        "low",
                     ),
                 )
+                alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                increment_keyword_frequency(conn, keyword["id"])
+                score_alert(conn, alert_id, keyword["id"], source_id)
                 new_alerts += 1
 
     conn.commit()
