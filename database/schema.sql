@@ -21,12 +21,13 @@ CREATE TABLE IF NOT EXISTS alerts (
     content TEXT,
     url TEXT,
     source_id INTEGER,
-    matched_keyword_id INTEGER,
+    keyword_id INTEGER,
+    matched_term TEXT,
     severity TEXT DEFAULT 'low',
     reviewed INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (source_id) REFERENCES sources(id),
-    FOREIGN KEY (matched_keyword_id) REFERENCES keywords(id)
+    FOREIGN KEY (keyword_id) REFERENCES keywords(id)
 );
 
 CREATE TABLE IF NOT EXISTS threat_actors (
