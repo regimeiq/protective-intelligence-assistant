@@ -2,10 +2,10 @@ import sqlite3
 import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "osint_monitor.db")
-SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
 
 def get_connection():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -14,14 +14,16 @@ def get_connection():
 
 def init_db():
     conn = get_connection()
-    with open(SCHEMA_PATH, "r") as f:
+    schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+    with open(schema_path, "r") as f:
         conn.executescript(f.read())
     conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
 
 
-def seed_sources():
+def seed_default_sources():
+    conn = get_connection()
     sources = [
         ("CISA Alerts", "https://www.cisa.gov/news.xml", "rss"),
         ("Krebs on Security", "https://krebsonsecurity.com/feed/", "rss"),
@@ -30,44 +32,42 @@ def seed_sources():
         ("r/netsec", "https://www.reddit.com/r/netsec/.rss", "reddit"),
         ("r/threatintel", "https://www.reddit.com/r/threatintel/.rss", "reddit"),
     ]
-    conn = get_connection()
     for name, url, source_type in sources:
-        existing = conn.execute(
-            "SELECT id FROM sources WHERE url = ?", (url,)
-        ).fetchone()
-        if not existing:
+        try:
             conn.execute(
-                "INSERT INTO sources (name, url, source_type) VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO sources (name, url, source_type) VALUES (?, ?, ?)",
                 (name, url, source_type),
             )
+        except sqlite3.IntegrityError:
+            pass
     conn.commit()
     conn.close()
     print("Default sources seeded.")
 
 
-def seed_keywords():
+def seed_default_keywords():
+    conn = get_connection()
     keywords = [
         ("ransomware", "malware"),
-        ("data breach", "incident"),
-        ("credential leak", "incident"),
-        ("threat actor", "actor"),
-        ("zero-day", "vulnerability"),
+        ("data breach", "general"),
+        ("credential leak", "vulnerability"),
+        ("phishing", "general"),
+        ("zero day", "vulnerability"),
+        ("APT", "threat_actor"),
+        ("supply chain attack", "general"),
         ("CVE", "vulnerability"),
-        ("phishing", "tactics"),
-        ("APT", "actor"),
-        ("supply chain attack", "tactics"),
-        ("insider threat", "threat"),
-        ("nation-state", "actor"),
-        ("cryptocurrency fraud", "financial"),
-        ("dark web", "source"),
-        ("exploit", "vulnerability"),
-        ("DDoS", "tactics"),
+        ("DDoS", "general"),
+        ("insider threat", "general"),
+        ("cryptocurrency fraud", "general"),
+        ("dark web", "general"),
+        ("threat actor", "threat_actor"),
+        ("exploitation", "vulnerability"),
+        ("malware", "malware"),
     ]
-    conn = get_connection()
     for term, category in keywords:
         try:
             conn.execute(
-                "INSERT INTO keywords (term, category) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO keywords (term, category) VALUES (?, ?)",
                 (term, category),
             )
         except sqlite3.IntegrityError:
@@ -79,5 +79,6 @@ def seed_keywords():
 
 if __name__ == "__main__":
     init_db()
-    seed_sources()
-    seed_keywords()
+    seed_default_sources()
+    seed_default_keywords()
+    print("Setup complete.")
