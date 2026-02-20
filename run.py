@@ -11,7 +11,7 @@ Usage:
 
 import sys
 import subprocess
-from database.init_db import init_db, seed_default_sources, seed_default_keywords
+from database.init_db import init_db, migrate_schema, seed_default_sources, seed_default_keywords, seed_threat_actors
 from scraper import run_all_scrapers
 
 
@@ -24,15 +24,19 @@ def main():
 
     if command == "init":
         init_db()
+        migrate_schema()
         seed_default_sources()
         seed_default_keywords()
+        seed_threat_actors()
 
     elif command == "scrape":
         init_db()
+        migrate_schema()
         run_all_scrapers()
 
     elif command == "api":
         init_db()
+        migrate_schema()
         subprocess.run(
             ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
         )

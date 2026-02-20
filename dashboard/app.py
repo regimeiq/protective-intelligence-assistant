@@ -2,163 +2,457 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
+from datetime import datetime, date
 
 API_URL = "http://localhost:8000"
 
-st.set_page_config(page_title="OSINT Threat Monitor", layout="wide")
-st.title("OSINT Threat Monitor")
+st.set_page_config(
+    page_title="OSINT Threat Monitor",
+    page_icon="🛡️",
+    layout="wide",
+)
 
-# --- SUMMARY METRICS ---
+st.title("🛡️ OSINT Threat Monitor — Protective Intelligence Platform")
+
+# --- Check API connection ---
 try:
-    summary = requests.get(f"{API_URL}/alerts/summary").json()
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Alerts", summary["total_alerts"])
-    col2.metric("Unreviewed", summary["unreviewed"])
-    col3.metric(
-        "Critical",
-        summary["by_severity"].get("critical", 0),
-    )
-    col4.metric(
-        "High",
-        summary["by_severity"].get("high", 0),
-    )
-
-    # --- SEVERITY BREAKDOWN ---
-    st.subheader("Alerts by Severity")
-    if summary["by_severity"]:
-        severity_df = pd.DataFrame(
-            list(summary["by_severity"].items()), columns=["Severity", "Count"]
-        )
-        severity_order = ["critical", "high", "medium", "low"]
-        severity_df["Severity"] = pd.Categorical(
-            severity_df["Severity"], categories=severity_order, ordered=True
-        )
-        severity_df = severity_df.sort_values("Severity")
-        color_map = {
-            "critical": "#dc2626",
-            "high": "#f97316",
-            "medium": "#eab308",
-            "low": "#22c55e",
-        }
-        fig_severity = px.bar(
-            severity_df,
-            x="Severity",
-            y="Count",
-            color="Severity",
-            color_discrete_map=color_map,
-        )
-        fig_severity.update_layout(showlegend=False)
-        st.plotly_chart(fig_severity, use_container_width=True)
-
-    # --- SOURCE BREAKDOWN ---
-    col_left, col_right = st.columns(2)
-
-    with col_left:
-        st.subheader("Alerts by Source")
-        if summary["by_source"]:
-            source_df = pd.DataFrame(
-                list(summary["by_source"].items()), columns=["Source", "Count"]
-            )
-            fig_source = px.pie(source_df, values="Count", names="Source", hole=0.4)
-            st.plotly_chart(fig_source, use_container_width=True)
-
-    with col_right:
-        st.subheader("Top Matched Keywords")
-        if summary["top_keywords"]:
-            kw_df = pd.DataFrame(
-                list(summary["top_keywords"].items()), columns=["Keyword", "Count"]
-            )
-            kw_df = kw_df.sort_values("Count", ascending=True)
-            fig_kw = px.bar(kw_df, x="Count", y="Keyword", orientation="h")
-            st.plotly_chart(fig_kw, use_container_width=True)
-
+    requests.get(f"{API_URL}/", timeout=3)
 except requests.ConnectionError:
     st.error("Cannot connect to API. Make sure the API server is running on port 8000.")
     st.stop()
 
-# --- ALERT FEED ---
-st.subheader("Alert Feed")
+# --- Tab layout ---
+tab_overview, tab_intel, tab_alerts, tab_analytics, tab_config = st.tabs([
+    "📊 Overview",
+    "📋 Intelligence Report",
+    "🚨 Alert Feed",
+    "📈 Analytics",
+    "⚙️ Configuration",
+])
 
-filter_col1, filter_col2 = st.columns(2)
-with filter_col1:
-    severity_filter = st.selectbox(
-        "Filter by Severity", ["All", "critical", "high", "medium", "low"]
-    )
-with filter_col2:
-    review_filter = st.selectbox(
-        "Filter by Status", ["All", "Unreviewed", "Reviewed"]
-    )
+SEVERITY_COLORS = {
+    "critical": "#dc2626",
+    "high": "#f97316",
+    "medium": "#eab308",
+    "low": "#22c55e",
+}
+SEVERITY_ICONS = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 
-params = {"limit": 100}
-if severity_filter != "All":
-    params["severity"] = severity_filter
-if review_filter == "Unreviewed":
-    params["reviewed"] = 0
-elif review_filter == "Reviewed":
-    params["reviewed"] = 1
 
-try:
-    alerts = requests.get(f"{API_URL}/alerts", params=params).json()
+# ============================================================
+# TAB 1: OVERVIEW
+# ============================================================
+with tab_overview:
+    try:
+        summary = requests.get(f"{API_URL}/alerts/summary").json()
 
-    if alerts:
-        for alert in alerts:
-            severity = alert["severity"]
-            severity_colors = {
-                "critical": "🔴",
-                "high": "🟠",
-                "medium": "🟡",
-                "low": "🟢",
-            }
-            icon = severity_colors.get(severity, "⚪")
-            reviewed_tag = "✅" if alert["reviewed"] else "🔲"
+        # KPI Row
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        col1.metric("Total Alerts", summary["total_alerts"])
+        col2.metric("Unreviewed", summary["unreviewed"])
+        col3.metric("Critical", summary["by_severity"].get("critical", 0))
+        col4.metric("High", summary["by_severity"].get("high", 0))
+        col5.metric("Avg Risk Score", f"{summary.get('avg_risk_score', 0):.1f}")
+        col6.metric("Active Spikes", summary.get("active_spikes", 0))
 
-            with st.expander(
-                f"{icon} {reviewed_tag} [{severity.upper()}] {alert['title'][:100]}"
-            ):
-                st.write(f"**Source:** {alert.get('source_name', 'Unknown')}")
-                st.write(f"**Matched Keyword:** {alert.get('matched_term', 'N/A')}")
-                st.write(f"**Time:** {alert['created_at']}")
-                if alert.get("url"):
-                    st.write(f"**URL:** {alert['url']}")
-                if alert.get("content"):
-                    st.write(f"**Content:** {alert['content'][:300]}...")
-                if not alert["reviewed"]:
-                    if st.button(f"Mark Reviewed", key=f"review_{alert['id']}"):
-                        requests.patch(f"{API_URL}/alerts/{alert['id']}/review")
-                        st.rerun()
-    else:
-        st.info("No alerts found matching your filters.")
+        st.divider()
 
-except requests.ConnectionError:
-    st.error("Cannot connect to API.")
+        # Charts row
+        col_left, col_mid, col_right = st.columns(3)
 
-# --- KEYWORD MANAGEMENT ---
-st.subheader("Keyword Management")
+        with col_left:
+            st.subheader("Alerts by Severity")
+            if summary["by_severity"]:
+                severity_df = pd.DataFrame(
+                    list(summary["by_severity"].items()), columns=["Severity", "Count"]
+                )
+                severity_order = ["critical", "high", "medium", "low"]
+                severity_df["Severity"] = pd.Categorical(
+                    severity_df["Severity"], categories=severity_order, ordered=True
+                )
+                severity_df = severity_df.sort_values("Severity")
+                fig_sev = px.bar(
+                    severity_df, x="Severity", y="Count",
+                    color="Severity", color_discrete_map=SEVERITY_COLORS,
+                )
+                fig_sev.update_layout(showlegend=False, height=350)
+                st.plotly_chart(fig_sev, use_container_width=True)
 
-with st.form("add_keyword"):
-    new_term = st.text_input("New Keyword")
-    new_category = st.selectbox(
-        "Category",
-        ["general", "malware", "incident", "vulnerability", "actor", "tactics", "threat", "financial", "source"],
-    )
-    submitted = st.form_submit_button("Add Keyword")
-    if submitted and new_term:
-        resp = requests.post(
-            f"{API_URL}/keywords",
-            json={"term": new_term, "category": new_category},
-        )
-        if resp.status_code == 200:
-            st.success(f"Added keyword: {new_term}")
-            st.rerun()
+        with col_mid:
+            st.subheader("Alerts by Source")
+            if summary["by_source"]:
+                source_df = pd.DataFrame(
+                    list(summary["by_source"].items()), columns=["Source", "Count"]
+                )
+                fig_src = px.pie(source_df, values="Count", names="Source", hole=0.4)
+                fig_src.update_layout(height=350)
+                st.plotly_chart(fig_src, use_container_width=True)
+
+        with col_right:
+            st.subheader("Top Matched Keywords")
+            if summary["top_keywords"]:
+                kw_df = pd.DataFrame(
+                    list(summary["top_keywords"].items()), columns=["Keyword", "Count"]
+                )
+                kw_df = kw_df.sort_values("Count", ascending=True)
+                fig_kw = px.bar(kw_df, x="Count", y="Keyword", orientation="h")
+                fig_kw.update_layout(height=350)
+                st.plotly_chart(fig_kw, use_container_width=True)
+
+        # Risk score distribution
+        st.subheader("Risk Score Distribution")
+        alerts_for_dist = requests.get(
+            f"{API_URL}/alerts", params={"limit": 500}
+        ).json()
+        if alerts_for_dist:
+            scores = [a["risk_score"] for a in alerts_for_dist if a.get("risk_score")]
+            if scores:
+                fig_hist = px.histogram(
+                    x=scores, nbins=20,
+                    labels={"x": "Risk Score", "y": "Count"},
+                    color_discrete_sequence=["#f97316"],
+                )
+                fig_hist.update_layout(
+                    xaxis_title="Risk Score", yaxis_title="Alert Count", height=300,
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+
+    except requests.ConnectionError:
+        st.error("Cannot connect to API.")
+
+
+# ============================================================
+# TAB 2: INTELLIGENCE REPORT
+# ============================================================
+with tab_intel:
+    st.subheader("Daily Intelligence Report")
+
+    report_date = st.date_input("Report Date", value=date.today())
+
+    try:
+        report = requests.get(
+            f"{API_URL}/intelligence/daily",
+            params={"date": report_date.strftime("%Y-%m-%d")},
+        ).json()
+
+        # Executive Summary
+        st.markdown("### Executive Summary")
+        st.info(report.get("executive_summary", "No data available for this date."))
+
+        # Stats row
+        stats = report.get("stats", {})
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total", stats.get("total_alerts", 0))
+        c2.metric("Critical", stats.get("critical_count", 0))
+        c3.metric("High", stats.get("high_count", 0))
+        c4.metric("Medium", stats.get("medium_count", 0))
+
+        st.divider()
+
+        # Escalation Recommendations
+        escalations = report.get("escalation_recommendations", [])
+        st.markdown("### Escalation Recommendations")
+        if escalations:
+            for esc in escalations:
+                priority = esc.get("priority", "MEDIUM")
+                if priority == "IMMEDIATE":
+                    st.error(f"**[{priority}]** {esc.get('action', '')}")
+                elif priority == "HIGH":
+                    st.warning(f"**[{priority}]** {esc.get('action', '')}")
+                else:
+                    st.info(f"**[{priority}]** {esc.get('action', '')}")
         else:
-            st.error("Keyword already exists or error occurred.")
+            st.success("No escalation items at this time.")
 
-try:
-    keywords = requests.get(f"{API_URL}/keywords").json()
-    if keywords:
-        kw_display = pd.DataFrame(keywords)[["id", "term", "category", "active"]]
-        st.dataframe(kw_display, use_container_width=True)
-except requests.ConnectionError:
-    st.error("Cannot connect to API.")
+        st.divider()
+
+        # Top Risks
+        top_risks = report.get("top_risks", [])
+        st.markdown("### Top Risks")
+        if top_risks:
+            risk_df = pd.DataFrame(top_risks)
+            display_cols = [c for c in ["title", "risk_score", "severity", "source_name", "keyword"] if c in risk_df.columns]
+            if display_cols:
+                st.dataframe(
+                    risk_df[display_cols].rename(columns={
+                        "title": "Title", "risk_score": "Risk Score",
+                        "severity": "Severity", "source_name": "Source",
+                        "keyword": "Keyword",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        else:
+            st.info("No alerts found for this date.")
+
+        st.divider()
+
+        # Emerging Themes
+        themes = report.get("emerging_themes", [])
+        st.markdown("### Emerging Themes (Frequency Spikes)")
+        if themes:
+            themes_df = pd.DataFrame(themes)
+            fig_themes = px.bar(
+                themes_df, x="term", y="spike_ratio",
+                color="spike_ratio", color_continuous_scale="OrRd",
+                labels={"term": "Keyword", "spike_ratio": "Spike Ratio (vs 7d avg)"},
+            )
+            fig_themes.update_layout(height=350)
+            st.plotly_chart(fig_themes, use_container_width=True)
+        else:
+            st.info("No keyword spikes detected. Spike detection requires 3+ days of scraping data.")
+
+        # Active Threat Actors
+        actors = report.get("active_threat_actors", [])
+        st.markdown("### Active Threat Actors")
+        if actors:
+            for actor in actors:
+                known = ", ".join(a["name"] for a in actor.get("known_actors", []))
+                line = f"- **{actor['keyword']}**: {actor['mentions']} mention(s)"
+                if known:
+                    line += f" — linked to: {known}"
+                st.markdown(line)
+        else:
+            st.info("No threat actor activity detected for this period.")
+
+    except requests.ConnectionError:
+        st.error("Cannot connect to API.")
+    except Exception as e:
+        st.error(f"Error generating report: {e}")
+
+
+# ============================================================
+# TAB 3: ALERT FEED
+# ============================================================
+with tab_alerts:
+    st.subheader("Alert Feed")
+
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    with filter_col1:
+        severity_filter = st.selectbox(
+            "Filter by Severity", ["All", "critical", "high", "medium", "low"]
+        )
+    with filter_col2:
+        review_filter = st.selectbox(
+            "Filter by Status", ["All", "Unreviewed", "Reviewed"]
+        )
+    with filter_col3:
+        min_score = st.slider("Minimum Risk Score", 0.0, 100.0, 0.0, 5.0)
+
+    params = {"limit": 100, "sort_by": "risk_score"}
+    if severity_filter != "All":
+        params["severity"] = severity_filter
+    if review_filter == "Unreviewed":
+        params["reviewed"] = 0
+    elif review_filter == "Reviewed":
+        params["reviewed"] = 1
+    if min_score > 0:
+        params["min_score"] = min_score
+
+    try:
+        alerts = requests.get(f"{API_URL}/alerts", params=params).json()
+
+        if alerts:
+            for alert in alerts:
+                severity = alert["severity"]
+                icon = SEVERITY_ICONS.get(severity, "⚪")
+                reviewed_tag = "✅" if alert["reviewed"] else "🔲"
+                score = alert.get("risk_score", 0) or 0
+
+                with st.expander(
+                    f"{icon} {reviewed_tag} [{severity.upper()} {score:.0f}] {alert['title'][:100]}"
+                ):
+                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    mc1.write(f"**Risk Score:** {score:.1f}")
+                    mc2.write(f"**Source:** {alert.get('source_name', 'Unknown')}")
+                    mc3.write(f"**Keyword:** {alert.get('matched_term', 'N/A')}")
+                    mc4.write(f"**Time:** {alert['created_at']}")
+
+                    if alert.get("url"):
+                        st.write(f"**URL:** {alert['url']}")
+                    if alert.get("content"):
+                        st.write(f"**Content:** {alert['content'][:500]}...")
+
+                    # Score breakdown
+                    try:
+                        score_data = requests.get(
+                            f"{API_URL}/alerts/{alert['id']}/score"
+                        ).json()
+                        if "keyword_weight" in score_data:
+                            st.markdown("**Score Breakdown:**")
+                            sc1, sc2, sc3, sc4 = st.columns(4)
+                            sc1.metric("Keyword Weight", f"{score_data['keyword_weight']:.1f}")
+                            sc2.metric("Source Credibility", f"{score_data['source_credibility']:.2f}")
+                            sc3.metric("Frequency Factor", f"{score_data['frequency_factor']:.1f}x")
+                            sc4.metric("Recency Factor", f"{score_data['recency_factor']:.2f}")
+                    except Exception:
+                        pass
+
+                    if not alert["reviewed"]:
+                        if st.button("Mark Reviewed", key=f"review_{alert['id']}"):
+                            requests.patch(f"{API_URL}/alerts/{alert['id']}/review")
+                            st.rerun()
+        else:
+            st.info("No alerts found matching your filters.")
+
+    except requests.ConnectionError:
+        st.error("Cannot connect to API.")
+
+
+# ============================================================
+# TAB 4: ANALYTICS
+# ============================================================
+with tab_analytics:
+    st.subheader("Threat Analytics")
+
+    # Spike Detection
+    st.markdown("### Keyword Frequency Spikes")
+    try:
+        spikes = requests.get(f"{API_URL}/analytics/spikes", params={"threshold": 1.5}).json()
+        if spikes:
+            spike_df = pd.DataFrame(spikes)
+            fig_spike = px.bar(
+                spike_df, x="term", y="spike_ratio",
+                color="today_count", color_continuous_scale="Reds",
+                labels={"term": "Keyword", "spike_ratio": "Spike Ratio", "today_count": "Today's Count"},
+                title="Active Keyword Spikes (vs 7-day average)",
+            )
+            fig_spike.update_layout(height=400)
+            st.plotly_chart(fig_spike, use_container_width=True)
+            st.dataframe(spike_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No keyword spikes detected above threshold. Spike detection requires 3+ days of scraping history.")
+    except Exception as e:
+        st.error(f"Error loading spike data: {e}")
+
+    st.divider()
+
+    # Keyword Trend Explorer
+    st.markdown("### Keyword Trend Explorer")
+    try:
+        keywords = requests.get(f"{API_URL}/keywords").json()
+        if keywords:
+            kw_options = {k["term"]: k["id"] for k in keywords}
+            selected_term = st.selectbox("Select Keyword", list(kw_options.keys()))
+            if selected_term:
+                trend = requests.get(
+                    f"{API_URL}/analytics/keyword-trend/{kw_options[selected_term]}",
+                    params={"days": 14},
+                ).json()
+                if trend:
+                    trend_df = pd.DataFrame(trend)
+                    fig_trend = px.line(
+                        trend_df, x="date", y="count",
+                        title=f"Daily frequency: {selected_term}",
+                        markers=True,
+                    )
+                    fig_trend.update_layout(height=350)
+                    st.plotly_chart(fig_trend, use_container_width=True)
+                else:
+                    st.info("No frequency data yet for this keyword. Run the scraper to populate.")
+    except Exception as e:
+        st.error(f"Error loading trend data: {e}")
+
+    st.divider()
+
+    # Source Credibility Overview
+    st.markdown("### Source Credibility Ratings")
+    try:
+        sources = requests.get(f"{API_URL}/sources").json()
+        if sources:
+            source_df = pd.DataFrame(sources)
+            if "credibility_score" in source_df.columns:
+                source_df = source_df.sort_values("credibility_score", ascending=True)
+                fig_cred = px.bar(
+                    source_df, x="credibility_score", y="name", orientation="h",
+                    color="credibility_score", color_continuous_scale="Greens",
+                    labels={"credibility_score": "Credibility Score", "name": "Source"},
+                    title="Intelligence Source Credibility",
+                )
+                fig_cred.update_layout(height=350)
+                st.plotly_chart(fig_cred, use_container_width=True)
+    except Exception as e:
+        st.error(f"Error loading source data: {e}")
+
+
+# ============================================================
+# TAB 5: CONFIGURATION
+# ============================================================
+with tab_config:
+    st.subheader("Configuration")
+
+    # --- Keyword Management ---
+    st.markdown("### Keyword Management")
+
+    with st.form("add_keyword"):
+        kc1, kc2, kc3 = st.columns(3)
+        with kc1:
+            new_term = st.text_input("New Keyword")
+        with kc2:
+            new_category = st.selectbox(
+                "Category",
+                ["general", "malware", "incident", "vulnerability", "threat_actor",
+                 "tactics", "financial"],
+            )
+        with kc3:
+            new_weight = st.slider("Threat Weight", 0.1, 5.0, 1.0, 0.1)
+        submitted = st.form_submit_button("Add Keyword")
+        if submitted and new_term:
+            resp = requests.post(
+                f"{API_URL}/keywords",
+                json={"term": new_term, "category": new_category, "weight": new_weight},
+            )
+            if resp.status_code == 200:
+                st.success(f"Added keyword: {new_term} (weight: {new_weight})")
+                st.rerun()
+            else:
+                st.error("Keyword already exists or error occurred.")
+
+    try:
+        keywords = requests.get(f"{API_URL}/keywords").json()
+        if keywords:
+            kw_df = pd.DataFrame(keywords)
+            display_cols = [c for c in ["id", "term", "category", "weight", "active"] if c in kw_df.columns]
+            st.dataframe(kw_df[display_cols], use_container_width=True, hide_index=True)
+    except Exception:
+        pass
+
+    st.divider()
+
+    # --- Source Credibility ---
+    st.markdown("### Source Credibility")
+    try:
+        sources = requests.get(f"{API_URL}/sources").json()
+        if sources:
+            for src in sources:
+                sc1, sc2 = st.columns([3, 1])
+                cred = src.get("credibility_score", 0.5)
+                sc1.write(f"**{src['name']}** ({src['source_type']}) — Credibility: {cred:.2f}")
+                sc2.write("")  # spacer
+    except Exception:
+        pass
+
+    st.divider()
+
+    # --- Rescore ---
+    st.markdown("### Re-score Alerts")
+    st.write("Re-calculate risk scores for all unreviewed alerts using current keyword weights and source credibility.")
+    if st.button("Re-score All Unreviewed Alerts"):
+        try:
+            result = requests.post(f"{API_URL}/alerts/rescore").json()
+            st.success(f"Rescored {result['alerts_rescored']} alerts.")
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+    st.divider()
+
+    # --- Threat Actors ---
+    st.markdown("### Known Threat Actors")
+    try:
+        actors = requests.get(f"{API_URL}/threat-actors").json()
+        if actors:
+            actor_df = pd.DataFrame(actors)
+            display_cols = [c for c in ["name", "aliases", "description"] if c in actor_df.columns]
+            st.dataframe(actor_df[display_cols], use_container_width=True, hide_index=True)
+    except Exception:
+        pass

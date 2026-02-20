@@ -1,8 +1,8 @@
 import feedparser
 import re
-import sqlite3
 from datetime import datetime
 from database.init_db import get_connection
+from analytics.risk_scoring import increment_keyword_frequency, score_alert
 
 
 def fetch_rss_feed(url):
@@ -50,16 +50,6 @@ def alert_exists(conn, source_id, keyword_id, url):
     return cursor.fetchone() is not None
 
 
-def assign_severity(keyword_category, match_count):
-    if match_count >= 3:
-        return "critical"
-    if keyword_category in ("malware", "threat_actor"):
-        return "high"
-    if keyword_category == "vulnerability":
-        return "medium"
-    return "low"
-
-
 def run_rss_scraper():
     conn = get_connection()
     keywords = get_active_keywords(conn)
@@ -76,10 +66,9 @@ def run_rss_scraper():
 
             for keyword in matches:
                 if not alert_exists(conn, source["id"], keyword["id"], entry["url"]):
-                    severity = assign_severity(keyword["category"], len(matches))
                     conn.execute(
-                        """INSERT INTO alerts 
-                           (source_id, keyword_id, title, content, url, matched_term, severity) 
+                        """INSERT INTO alerts
+                           (source_id, keyword_id, title, content, url, matched_term, severity)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (
                             source["id"],
@@ -88,8 +77,13 @@ def run_rss_scraper():
                             entry["content"][:2000],
                             entry["url"],
                             keyword["term"],
-                            severity,
+                            "low",
                         ),
+                    )
+                    alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    increment_keyword_frequency(conn, keyword["id"])
+                    risk_score = score_alert(
+                        conn, alert_id, keyword["id"], source["id"]
                     )
                     new_alerts += 1
 

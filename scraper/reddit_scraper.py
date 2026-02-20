@@ -1,8 +1,8 @@
 import feedparser
-import re
 from datetime import datetime
 from database.init_db import get_connection
-from scraper.rss_scraper import match_keywords, get_active_keywords, alert_exists, assign_severity
+from scraper.rss_scraper import match_keywords, get_active_keywords, alert_exists
+from analytics.risk_scoring import increment_keyword_frequency, score_alert
 
 
 def fetch_reddit_rss(url):
@@ -43,10 +43,9 @@ def run_reddit_scraper():
 
             for keyword in matches:
                 if not alert_exists(conn, source["id"], keyword["id"], entry["url"]):
-                    severity = assign_severity(keyword["category"], len(matches))
                     conn.execute(
-                        """INSERT INTO alerts 
-                           (source_id, keyword_id, title, content, url, matched_term, severity) 
+                        """INSERT INTO alerts
+                           (source_id, keyword_id, title, content, url, matched_term, severity)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (
                             source["id"],
@@ -55,9 +54,12 @@ def run_reddit_scraper():
                             entry["content"][:2000],
                             entry["url"],
                             keyword["term"],
-                            severity,
+                            "low",
                         ),
                     )
+                    alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    increment_keyword_frequency(conn, keyword["id"])
+                    score_alert(conn, alert_id, keyword["id"], source["id"])
                     new_alerts += 1
 
     conn.commit()
