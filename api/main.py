@@ -5,7 +5,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from database.init_db import get_connection, init_db, seed_sources, seed_keywords
+from database.init_db import get_connection, init_db, seed_default_sources, seed_default_keywords
 
 app = FastAPI(
     title="OSINT Threat Monitor API",
@@ -41,8 +41,8 @@ class AlertResponse(BaseModel):
 @app.on_event("startup")
 def startup():
     init_db()
-    seed_sources()
-    seed_keywords()
+    seed_default_sources()
+    seed_default_keywords()
 
 
 @app.get("/")
@@ -65,7 +65,7 @@ def get_alerts(
                s.name as source_name, k.term as matched_term
         FROM alerts a
         LEFT JOIN sources s ON a.source_id = s.id
-        LEFT JOIN keywords k ON a.matched_keyword_id = k.id
+        LEFT JOIN keywords k ON a.keyword_id = k.id
         WHERE 1=1
     """
     params = []
@@ -99,7 +99,7 @@ def get_alerts_summary():
     ).fetchall()
     top_keywords = conn.execute(
         """SELECT k.term, COUNT(*) as count FROM alerts a
-        JOIN keywords k ON a.matched_keyword_id = k.id
+        JOIN keywords k ON a.keyword_id = k.id
         GROUP BY k.term ORDER BY count DESC LIMIT 10"""
     ).fetchall()
     unreviewed = conn.execute(
