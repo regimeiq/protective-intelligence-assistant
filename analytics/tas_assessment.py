@@ -22,6 +22,18 @@ TARGETING_TIME_PATTERNS = [
 ]
 
 
+def _assessment_window_bounds(window_days):
+    # Anchor to day boundaries so repeated runs during the same day upsert
+    # the same rolling window row.
+    now = utcnow()
+    window_end_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    window_start_dt = window_end_dt - timedelta(days=window_days)
+    return (
+        window_start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        window_end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
 def _compute_energy_burst(day_counts):
     today = utcnow().strftime("%Y-%m-%d")
     today_count = day_counts.get(today, 0)
@@ -55,10 +67,7 @@ def _source_beta_for_poi(conn, poi_id, window_start, window_end):
 
 
 def compute_poi_assessment(conn, poi_id, window_days=14, n=500):
-    window_end_dt = utcnow()
-    window_start_dt = window_end_dt - timedelta(days=window_days)
-    window_start = window_start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    window_end = window_end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    window_start, window_end = _assessment_window_bounds(window_days)
 
     rows = conn.execute(
         """SELECT ph.context, ph.match_value,

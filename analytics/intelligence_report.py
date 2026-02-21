@@ -2,11 +2,21 @@
 
 import json
 from datetime import datetime, timedelta
+from math import asin, cos, radians, sin, sqrt
 
-from analytics.governance import redact_text
+from analytics.governance import get_redaction_terms, redact_text
 from analytics.spike_detection import detect_spikes
 from analytics.utils import utcnow
 from database.init_db import get_connection
+
+
+def _haversine_miles(lat1, lon1, lat2, lon2):
+    radius_miles = 3958.756
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    c = 2 * asin(sqrt(a))
+    return radius_miles * c
 
 
 def _severity_counts(conn, start_date, end_date):
@@ -108,21 +118,47 @@ def _facility_watch(conn, start_date, end_date):
 
 
 def _upcoming_event_watch(conn):
-    rows = conn.execute(
-        """SELECT e.id, e.name, e.type, e.start_dt, e.end_dt, e.city, e.venue,
-                  p.name AS poi_name,
-                  COALESCE(MAX(a.ors_score), 0) AS max_ors,
-                  COUNT(a.id) AS nearby_alerts
+    events = conn.execute(
+        """SELECT e.id, e.name, e.type, e.start_dt, e.end_dt, e.city, e.venue, e.lat, e.lon,
+                  p.name AS poi_name
         FROM events e
         LEFT JOIN pois p ON p.id = e.poi_id
-        LEFT JOIN alert_proximity ap ON ap.within_radius = 1
-        LEFT JOIN alerts a ON a.id = ap.alert_id
         WHERE datetime(e.start_dt) >= datetime('now')
           AND datetime(e.start_dt) <= datetime('now', '+7 days')
-        GROUP BY e.id
         ORDER BY datetime(e.start_dt) ASC"""
     ).fetchall()
-    return [dict(row) for row in rows]
+    if not events:
+        return []
+
+    recent_alert_locations = conn.execute(
+        """SELECT a.id AS alert_id, COALESCE(a.ors_score, a.risk_score, 0) AS ors_score,
+                  al.lat, al.lon
+        FROM alerts a
+        JOIN alert_locations al ON al.alert_id = a.id
+        WHERE a.duplicate_of IS NULL
+          AND al.lat IS NOT NULL AND al.lon IS NOT NULL
+          AND datetime(COALESCE(a.published_at, a.created_at)) >= datetime('now', '-7 days')"""
+    ).fetchall()
+
+    output = []
+    for event in events:
+        payload = dict(event)
+        nearby_scores = {}
+        if event["lat"] is not None and event["lon"] is not None:
+            event_lat = float(event["lat"])
+            event_lon = float(event["lon"])
+            for row in recent_alert_locations:
+                distance = _haversine_miles(event_lat, event_lon, float(row["lat"]), float(row["lon"]))
+                if distance <= 25.0:
+                    alert_id = int(row["alert_id"])
+                    score = float(row["ors_score"] or 0.0)
+                    previous = nearby_scores.get(alert_id)
+                    if previous is None or score > previous:
+                        nearby_scores[alert_id] = score
+        payload["max_ors"] = round(max(nearby_scores.values()), 3) if nearby_scores else 0.0
+        payload["nearby_alerts"] = len(nearby_scores)
+        output.append(payload)
+    return output
 
 
 def _build_executive_summary(report_date, total, critical, high, prev_total, top_ops, top_pois):
@@ -200,18 +236,23 @@ def _build_escalations(top_ops, top_pois, facility_watch):
 
 
 def _apply_redaction(conn, report):
-    report["executive_summary"] = redact_text(conn, report.get("executive_summary", ""))
+    redaction_terms = get_redaction_terms(conn)
+    report["executive_summary"] = redact_text(
+        conn, report.get("executive_summary", ""), redaction_terms=redaction_terms
+    )
     for item in report.get("top_risks", []):
-        item["title"] = redact_text(conn, item.get("title", ""))
+        item["title"] = redact_text(conn, item.get("title", ""), redaction_terms=redaction_terms)
     for item in report.get("protectee_status", []):
-        item["name"] = redact_text(conn, item.get("name", ""))
+        item["name"] = redact_text(conn, item.get("name", ""), redaction_terms=redaction_terms)
         for excerpt_idx, excerpt in enumerate(item.get("evidence", {}).get("excerpts", [])):
-            item["evidence"]["excerpts"][excerpt_idx] = redact_text(conn, excerpt)
+            item["evidence"]["excerpts"][excerpt_idx] = redact_text(
+                conn, excerpt, redaction_terms=redaction_terms
+            )
     for item in report.get("escalation_recommendations", []):
         if "title" in item:
-            item["title"] = redact_text(conn, item["title"])
+            item["title"] = redact_text(conn, item["title"], redaction_terms=redaction_terms)
         if "poi" in item:
-            item["poi"] = redact_text(conn, item["poi"])
+            item["poi"] = redact_text(conn, item["poi"], redaction_terms=redaction_terms)
     return report
 
 

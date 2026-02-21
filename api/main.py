@@ -604,17 +604,27 @@ def get_graph(
 def get_pois(active_only: int = Query(default=1, ge=0, le=1)):
     conn = get_connection()
     query = "SELECT * FROM pois"
-    params = []
     if active_only == 1:
         query += " WHERE active = 1"
     query += " ORDER BY sensitivity DESC, name"
-    pois = [dict(row) for row in conn.execute(query, params).fetchall()]
-    for poi in pois:
-        aliases = conn.execute(
-            "SELECT id, alias, alias_type, active FROM poi_aliases WHERE poi_id = ? ORDER BY alias",
-            (poi["id"],),
+    pois = [dict(row) for row in conn.execute(query).fetchall()]
+    poi_ids = [poi["id"] for poi in pois]
+    aliases_by_poi = {poi_id: [] for poi_id in poi_ids}
+    if poi_ids:
+        placeholders = ",".join("?" for _ in poi_ids)
+        alias_rows = conn.execute(
+            f"""SELECT id, poi_id, alias, alias_type, active
+            FROM poi_aliases
+            WHERE poi_id IN ({placeholders})
+            ORDER BY alias""",
+            poi_ids,
         ).fetchall()
-        poi["aliases"] = [dict(alias) for alias in aliases]
+        for alias in alias_rows:
+            alias_payload = dict(alias)
+            poi_id = alias_payload.pop("poi_id")
+            aliases_by_poi.setdefault(poi_id, []).append(alias_payload)
+    for poi in pois:
+        poi["aliases"] = aliases_by_poi.get(poi["id"], [])
     conn.close()
     return pois
 
@@ -738,8 +748,9 @@ def get_protected_location_alerts(
     rows = conn.execute(
         """SELECT a.id, a.title, a.ors_score, a.tas_score, a.severity,
                   COALESCE(a.published_at, a.created_at) AS timestamp,
-                  ap.distance_miles, ap.within_radius,
-                  al.location_text
+                  MIN(ap.distance_miles) AS distance_miles,
+                  MAX(ap.within_radius) AS within_radius,
+                  GROUP_CONCAT(DISTINCT al.location_text) AS location_text
         FROM alert_proximity ap
         JOIN alerts a ON a.id = ap.alert_id
         LEFT JOIN alert_locations al ON al.alert_id = a.id
@@ -747,6 +758,7 @@ def get_protected_location_alerts(
           AND datetime(COALESCE(a.published_at, a.created_at)) >= datetime('now', ?)
           AND COALESCE(a.ors_score, a.risk_score) >= ?
           AND a.duplicate_of IS NULL
+        GROUP BY a.id, a.title, a.ors_score, a.tas_score, a.severity, COALESCE(a.published_at, a.created_at)
         ORDER BY COALESCE(a.ors_score, a.risk_score) DESC""",
         (location_id, f"-{int(days)} days", float(min_ors)),
     ).fetchall()
@@ -799,7 +811,7 @@ def get_map_points(days: int = Query(default=7, ge=1, le=30), min_ors: float = Q
     }
 
 
-@app.post("/briefs/travel")
+@app.post("/briefs/travel", dependencies=[Depends(verify_api_key)])
 def create_travel_brief(body: TravelBriefRequest):
     from analytics.travel_brief import generate_travel_brief
 
