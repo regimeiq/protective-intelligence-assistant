@@ -7,3 +7,7 @@ __pycache__/
 venv/
 .venv/
 .claude/
+docs/demo_daily_report.md
+docs/demo_travel_brief.md
+docs/protectee_view.svg
+docs/map_view.svg
