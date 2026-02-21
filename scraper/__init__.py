@@ -13,8 +13,10 @@ import time
 from datetime import datetime, timezone
 
 from analytics.entity_extraction import extract_and_store_alert_entities
+from analytics.ep_pipeline import process_ep_signals
 from analytics.utils import utcnow
 from database.init_db import get_connection
+from scraper.acled_connector import run_acled_collector
 from scraper.pastebin_monitor import run_pastebin_scraper
 from scraper.reddit_scraper import run_reddit_scraper
 from scraper.rss_scraper import (
@@ -197,7 +199,7 @@ async def run_rss_scraper_async(frequency_snapshot=None):
                     alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     if duplicate_of is None:
                         score_args = frequency_snapshot.get(keyword["id"])
-                        score_alert(
+                        baseline_score = score_alert(
                             conn,
                             alert_id,
                             keyword["id"],
@@ -207,6 +209,14 @@ async def run_rss_scraper_async(frequency_snapshot=None):
                             z_score_override=score_args[1] if score_args else None,
                         )
                         extract_and_store_alert_entities(conn, alert_id, f"{title}\n{content}")
+                        process_ep_signals(
+                            conn,
+                            alert_id=alert_id,
+                            title=title,
+                            content=content,
+                            keyword_category=keyword.get("category"),
+                            baseline_score=baseline_score,
+                        )
                         increment_keyword_frequency(conn, keyword["id"])
                         new_alerts += 1
                     else:
@@ -288,7 +298,7 @@ async def run_reddit_scraper_async(frequency_snapshot=None):
                     alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     if duplicate_of is None:
                         score_args = frequency_snapshot.get(keyword["id"])
-                        score_alert(
+                        baseline_score = score_alert(
                             conn,
                             alert_id,
                             keyword["id"],
@@ -298,6 +308,14 @@ async def run_reddit_scraper_async(frequency_snapshot=None):
                             z_score_override=score_args[1] if score_args else None,
                         )
                         extract_and_store_alert_entities(conn, alert_id, f"{title}\n{content}")
+                        process_ep_signals(
+                            conn,
+                            alert_id=alert_id,
+                            title=title,
+                            content=content,
+                            keyword_category=keyword.get("category"),
+                            baseline_score=baseline_score,
+                        )
                         increment_keyword_frequency(conn, keyword["id"])
                         new_alerts += 1
                     else:
@@ -323,8 +341,9 @@ async def run_all_scrapers_async():
 
     # Pastebin stays sync (individual paste fetches are rate-limited)
     pastebin_count = run_pastebin_scraper(frequency_snapshot=frequency_snapshot)
+    acled_count = run_acled_collector(frequency_snapshot=frequency_snapshot)
 
-    total = rss_count + reddit_count + pastebin_count
+    total = rss_count + reddit_count + pastebin_count + acled_count
     return total
 
 
@@ -348,6 +367,7 @@ def run_all_scrapers():
             total += run_rss_scraper(frequency_snapshot=frequency_snapshot)
             total += run_reddit_scraper(frequency_snapshot=frequency_snapshot)
             total += run_pastebin_scraper(frequency_snapshot=frequency_snapshot)
+            total += run_acled_collector(frequency_snapshot=frequency_snapshot)
     except Exception as e:
         print(f"Scraper error: {e}")
         status = "error"

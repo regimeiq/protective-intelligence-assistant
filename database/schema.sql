@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     duplicate_of INTEGER,
     published_at TIMESTAMP,
     risk_score REAL DEFAULT 0.0,
+    ors_score REAL DEFAULT 0.0,
+    tas_score REAL DEFAULT 0.0,
     severity TEXT DEFAULT 'low',
     reviewed INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -60,6 +62,10 @@ CREATE TABLE IF NOT EXISTS alert_scores (
     frequency_factor REAL DEFAULT 1.0,
     z_score REAL DEFAULT 0.0,
     recency_factor REAL DEFAULT 1.0,
+    category_factor REAL DEFAULT 0.0,
+    proximity_factor REAL DEFAULT 0.0,
+    event_factor REAL DEFAULT 0.0,
+    poi_factor REAL DEFAULT 0.0,
     final_score REAL NOT NULL,
     computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
@@ -137,4 +143,152 @@ CREATE TABLE IF NOT EXISTS alert_score_intervals (
     computed_at TEXT NOT NULL,
     method TEXT NOT NULL,
     FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS pois (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    org TEXT,
+    role TEXT,
+    sensitivity INTEGER DEFAULT 3,
+    active INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS poi_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    poi_id INTEGER NOT NULL,
+    alias TEXT NOT NULL,
+    alias_type TEXT DEFAULT 'name',
+    active INTEGER DEFAULT 1,
+    UNIQUE(poi_id, alias),
+    FOREIGN KEY (poi_id) REFERENCES pois(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS poi_hits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    poi_id INTEGER NOT NULL,
+    alert_id INTEGER NOT NULL,
+    match_type TEXT NOT NULL,
+    match_value TEXT NOT NULL,
+    match_score REAL NOT NULL,
+    context TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(poi_id, alert_id, match_value),
+    FOREIGN KEY (poi_id) REFERENCES pois(id) ON DELETE CASCADE,
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS protected_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    type TEXT,
+    lat REAL,
+    lon REAL,
+    radius_miles REAL DEFAULT 5.0,
+    active INTEGER DEFAULT 1,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS alert_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id INTEGER NOT NULL,
+    location_text TEXT NOT NULL,
+    lat REAL,
+    lon REAL,
+    resolver TEXT,
+    confidence REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS alert_proximity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id INTEGER NOT NULL,
+    protected_location_id INTEGER NOT NULL,
+    distance_miles REAL,
+    within_radius INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(alert_id, protected_location_id),
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE,
+    FOREIGN KEY (protected_location_id) REFERENCES protected_locations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    type TEXT,
+    start_dt TEXT NOT NULL,
+    end_dt TEXT NOT NULL,
+    city TEXT,
+    country TEXT,
+    venue TEXT,
+    lat REAL,
+    lon REAL,
+    poi_id INTEGER,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (poi_id) REFERENCES pois(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS event_risk_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    computed_at TEXT NOT NULL,
+    ors_mean REAL NOT NULL,
+    ors_p95 REAL NOT NULL,
+    top_drivers_json TEXT,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS dispositions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    rationale TEXT,
+    user TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS retention_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    rows_affected INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS geocode_cache (
+    query TEXT PRIMARY KEY,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    provider TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS poi_assessments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    poi_id INTEGER NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    fixation INTEGER DEFAULT 0,
+    energy_burst INTEGER DEFAULT 0,
+    leakage INTEGER DEFAULT 0,
+    pathway INTEGER DEFAULT 0,
+    targeting_specificity INTEGER DEFAULT 0,
+    tas_score REAL NOT NULL,
+    evidence_json TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(poi_id, window_start, window_end),
+    FOREIGN KEY (poi_id) REFERENCES pois(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS travel_briefs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    destination TEXT NOT NULL,
+    start_dt TEXT NOT NULL,
+    end_dt TEXT NOT NULL,
+    content_md TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

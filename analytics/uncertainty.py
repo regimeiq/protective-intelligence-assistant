@@ -29,6 +29,7 @@ def score_distribution(
     recency_factor,
     alpha,
     beta,
+    additive_boost=0.0,
     n=500,
     seed=0,
 ):
@@ -52,6 +53,7 @@ def score_distribution(
         cred = rng.betavariate(safe_alpha, safe_beta)
         sampled_weight = min(5.0, max(0.1, rng.gauss(safe_weight, safe_sigma)))
         score = (sampled_weight * safe_freq * cred * 20.0) + (safe_recency * 10.0)
+        score += float(additive_boost or 0.0)
         samples.append(max(0.0, min(100.0, score)))
 
     samples.sort()
@@ -66,6 +68,39 @@ def score_distribution(
         "p50": round(_percentile(samples, 0.50), 3),
         "p95": round(_percentile(samples, 0.95), 3),
         "method": "monte_carlo_beta_normal_v1",
+    }
+
+
+def beta_adjusted_interval(base_score, alpha, beta, n=500, seed=0):
+    """
+    Build an uncertainty interval around a base score using Beta credibility sampling.
+
+    Keeps the center near ``base_score`` and widens/narrows based on alpha/beta evidence.
+    """
+    if n <= 0:
+        raise ValueError("n must be > 0")
+    rng = random.Random(seed)
+    safe_alpha = max(float(alpha or 0), 0.01)
+    safe_beta = max(float(beta or 0), 0.01)
+    safe_base = max(0.0, min(100.0, float(base_score or 0.0)))
+
+    samples = []
+    for _ in range(n):
+        cred = rng.betavariate(safe_alpha, safe_beta)
+        multiplier = 0.5 + cred
+        samples.append(max(0.0, min(100.0, safe_base * multiplier)))
+
+    samples.sort()
+    mean = sum(samples) / len(samples)
+    variance = sum((x - mean) ** 2 for x in samples) / len(samples)
+    return {
+        "n": n,
+        "mean": round(mean, 3),
+        "std": round(math.sqrt(variance), 3),
+        "p05": round(_percentile(samples, 0.05), 3),
+        "p50": round(_percentile(samples, 0.50), 3),
+        "p95": round(_percentile(samples, 0.95), 3),
+        "method": "beta_adjusted_score_v1",
     }
 
 
@@ -110,7 +145,8 @@ def compute_uncertainty_for_alert(alert_id, n=500, seed=None, force=False, cache
             raise ValueError("Alert not found")
 
         latest_score = conn.execute(
-            """SELECT frequency_factor, recency_factor
+            """SELECT frequency_factor, recency_factor,
+                      category_factor, proximity_factor, event_factor, poi_factor
             FROM alert_scores WHERE alert_id = ?
             ORDER BY computed_at DESC LIMIT 1""",
             (alert_id,),
@@ -119,12 +155,19 @@ def compute_uncertainty_for_alert(alert_id, n=500, seed=None, force=False, cache
         if latest_score:
             freq_factor = latest_score["frequency_factor"]
             recency_factor = latest_score["recency_factor"]
+            additive_boost = (
+                float(latest_score["category_factor"] or 0.0)
+                + float(latest_score["proximity_factor"] or 0.0)
+                + float(latest_score["event_factor"] or 0.0)
+                + float(latest_score["poi_factor"] or 0.0)
+            )
         else:
             freq_factor, _ = get_frequency_factor(conn, row["keyword_id"])
             recency_factor, _ = compute_recency_factor(
                 published_at=row["published_at"],
                 created_at=row["created_at"],
             )
+            additive_boost = 0.0
 
         keyword_weight = row["weight"] if row["weight"] is not None else 1.0
         sigma_default = max(0.05, 0.2 * keyword_weight)
@@ -139,6 +182,7 @@ def compute_uncertainty_for_alert(alert_id, n=500, seed=None, force=False, cache
             recency_factor=recency_factor,
             alpha=alpha,
             beta=beta,
+            additive_boost=additive_boost,
             n=n,
             seed=seed,
         )

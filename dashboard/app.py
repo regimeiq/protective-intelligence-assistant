@@ -1,8 +1,7 @@
 import os
-from datetime import date, datetime
+from datetime import date, timedelta
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
@@ -10,1115 +9,305 @@ import streamlit as st
 API_URL = os.getenv("OSINT_API_URL", "http://localhost:8000").rstrip("/")
 
 st.set_page_config(
-    page_title="OSINT Threat Monitor",
+    page_title="Protective Intelligence Assistant",
     page_icon="🛡️",
     layout="wide",
 )
 
-st.title("🛡️ OSINT Threat Monitor — Protective Intelligence Platform")
+st.title("🛡️ Protective Intelligence / Executive Protection Assistant")
 
-# --- Check API connection ---
 try:
-    requests.get(f"{API_URL}/", timeout=3)
-except requests.ConnectionError:
-    st.error("Cannot connect to API. Make sure the API server is running on port 8000.")
+    requests.get(f"{API_URL}/", timeout=3).raise_for_status()
+except Exception:
+    st.error("Cannot connect to API. Start `python run.py api` first.")
     st.stop()
 
-# --- Tab layout ---
 (
-    tab_overview,
-    tab_intel,
+    tab_protectees,
+    tab_facilities,
+    tab_map,
+    tab_travel,
+    tab_report,
     tab_alerts,
-    tab_analytics,
-    tab_forecast,
-    tab_graph,
-    tab_scoring,
-    tab_perf,
     tab_config,
 ) = st.tabs(
     [
-        "📊 Overview",
-        "📋 Intelligence Report",
-        "🚨 Alert Feed",
-        "📈 Analytics",
-        "🔮 Forecast",
-        "🕸️ Graph",
-        "🧮 Scoring & Evaluation",
-        "⚡ Performance",
-        "⚙️ Configuration",
+        "👤 Protectees",
+        "🏢 Facilities",
+        "🗺️ Map",
+        "✈️ Travel Brief",
+        "📋 Daily Report",
+        "🚨 Alerts (Legacy)",
+        "⚙️ Config",
     ]
 )
 
-SEVERITY_COLORS = {
-    "critical": "#dc2626",
-    "high": "#f97316",
-    "medium": "#eab308",
-    "low": "#22c55e",
-}
-SEVERITY_ICONS = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
 
-
-# ============================================================
-# TAB 1: OVERVIEW
-# ============================================================
-with tab_overview:
+def _safe_get(path, params=None):
     try:
-        summary = requests.get(f"{API_URL}/alerts/summary").json()
-
-        # KPI Row
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-        col1.metric("Total Alerts", summary["total_alerts"])
-        col2.metric("Unique Alerts", summary.get("unique_alerts", summary["total_alerts"]))
-        col3.metric("Critical", summary["by_severity"].get("critical", 0))
-        col4.metric("High", summary["by_severity"].get("high", 0))
-        col5.metric("Avg Risk Score", f"{summary.get('avg_risk_score', 0):.1f}")
-        col6.metric("Active Spikes", summary.get("active_spikes", 0))
-
-        # Second KPI row
-        col7, col8, col9 = st.columns(3)
-        col7.metric("Unreviewed", summary["unreviewed"])
-        col8.metric("Duplicates Detected", summary.get("duplicates", 0))
-        dedup_pct = (
-            round(summary.get("duplicates", 0) / summary["total_alerts"] * 100, 1)
-            if summary["total_alerts"] > 0
-            else 0
-        )
-        col9.metric("Dedup Rate", f"{dedup_pct}%")
-
-        st.divider()
-
-        # Charts row
-        col_left, col_mid, col_right = st.columns(3)
-
-        with col_left:
-            st.subheader("Alerts by Severity")
-            if summary["by_severity"]:
-                severity_df = pd.DataFrame(
-                    list(summary["by_severity"].items()), columns=["Severity", "Count"]
-                )
-                severity_order = ["critical", "high", "medium", "low"]
-                severity_df["Severity"] = pd.Categorical(
-                    severity_df["Severity"], categories=severity_order, ordered=True
-                )
-                severity_df = severity_df.sort_values("Severity")
-                fig_sev = px.bar(
-                    severity_df,
-                    x="Severity",
-                    y="Count",
-                    color="Severity",
-                    color_discrete_map=SEVERITY_COLORS,
-                )
-                fig_sev.update_layout(showlegend=False, height=350)
-                st.plotly_chart(fig_sev, use_container_width=True)
-
-        with col_mid:
-            st.subheader("Alerts by Source")
-            if summary["by_source"]:
-                source_df = pd.DataFrame(
-                    list(summary["by_source"].items()), columns=["Source", "Count"]
-                )
-                fig_src = px.pie(source_df, values="Count", names="Source", hole=0.4)
-                fig_src.update_layout(height=350)
-                st.plotly_chart(fig_src, use_container_width=True)
-
-        with col_right:
-            st.subheader("Top Matched Keywords")
-            if summary["top_keywords"]:
-                kw_df = pd.DataFrame(
-                    list(summary["top_keywords"].items()), columns=["Keyword", "Count"]
-                )
-                kw_df = kw_df.sort_values("Count", ascending=True)
-                fig_kw = px.bar(kw_df, x="Count", y="Keyword", orientation="h")
-                fig_kw.update_layout(height=350)
-                st.plotly_chart(fig_kw, use_container_width=True)
-
-        # Risk score distribution
-        st.subheader("Risk Score Distribution")
-        alerts_for_dist = requests.get(f"{API_URL}/alerts", params={"limit": 500}).json()
-        if alerts_for_dist:
-            scores = [a["risk_score"] for a in alerts_for_dist if a.get("risk_score")]
-            if scores:
-                fig_hist = px.histogram(
-                    x=scores,
-                    nbins=20,
-                    labels={"x": "Risk Score", "y": "Count"},
-                    color_discrete_sequence=["#f97316"],
-                )
-                fig_hist.update_layout(
-                    xaxis_title="Risk Score",
-                    yaxis_title="Alert Count",
-                    height=300,
-                )
-                st.plotly_chart(fig_hist, use_container_width=True)
-
-    except requests.ConnectionError:
-        st.error("Cannot connect to API.")
+        return requests.get(f"{API_URL}{path}", params=params, timeout=20).json()
+    except Exception:
+        return None
 
 
-# ============================================================
-# TAB 2: INTELLIGENCE REPORT
-# ============================================================
-with tab_intel:
-    st.subheader("Daily Intelligence Report")
+with tab_protectees:
+    st.subheader("Protectee Monitoring")
+    pois = _safe_get("/pois") or []
+    if not pois:
+        st.info("No protectees found. Seed with `python run.py init`.")
+    else:
+        poi_map = {f"{poi['name']} ({poi.get('org') or 'N/A'})": poi for poi in pois}
+        selected_label = st.selectbox("Select protectee", list(poi_map.keys()))
+        selected = poi_map[selected_label]
 
-    report_date = st.date_input("Report Date", value=date.today())
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Sensitivity", selected.get("sensitivity", 3))
+        c2.metric("Role", selected.get("role") or "N/A")
+        c3.metric("Org", selected.get("org") or "N/A")
 
-    try:
-        report = requests.get(
-            f"{API_URL}/intelligence/daily",
-            params={"date": report_date.strftime("%Y-%m-%d")},
-        ).json()
+        force = st.checkbox("Recompute TAS now", value=False)
+        assessment = _safe_get(
+            f"/pois/{selected['id']}/assessment",
+            params={"window_days": 14, "force": 1 if force else 0},
+        ) or {}
 
-        # Executive Summary
-        st.markdown("### Executive Summary")
-        st.info(report.get("executive_summary", "No data available for this date."))
+        tas = float(assessment.get("tas_score") or 0.0)
+        evidence = assessment.get("evidence") or {}
+        interval = evidence.get("interval") or {}
 
-        # Stats row
-        stats = report.get("stats", {})
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total", stats.get("total_alerts", 0))
-        c2.metric("Critical", stats.get("critical_count", 0))
-        c3.metric("High", stats.get("high_count", 0))
-        c4.metric("Medium", stats.get("medium_count", 0))
-
-        st.divider()
-
-        # Escalation Recommendations
-        escalations = report.get("escalation_recommendations", [])
-        st.markdown("### Escalation Recommendations")
-        if escalations:
-            for esc in escalations:
-                priority = esc.get("priority", "MEDIUM")
-                if priority == "IMMEDIATE":
-                    st.error(f"**[{priority}]** {esc.get('action', '')}")
-                elif priority == "HIGH":
-                    st.warning(f"**[{priority}]** {esc.get('action', '')}")
-                else:
-                    st.info(f"**[{priority}]** {esc.get('action', '')}")
+        st.markdown("### Threat Assessment Score (TAS)")
+        if interval:
+            st.metric("TAS", f"{tas:.1f}", help=f"p05={interval.get('p05')} p95={interval.get('p95')}")
+            st.caption(
+                f"Interval: p05={interval.get('p05')} / p50={interval.get('p50')} / p95={interval.get('p95')}"
+            )
         else:
-            st.success("No escalation items at this time.")
+            st.metric("TAS", f"{tas:.1f}")
 
-        st.divider()
+        flags = [
+            ("fixation", assessment.get("fixation")),
+            ("energy_burst", assessment.get("energy_burst")),
+            ("leakage", assessment.get("leakage")),
+            ("pathway", assessment.get("pathway")),
+            ("targeting_specificity", assessment.get("targeting_specificity")),
+        ]
+        active_flags = [name for name, active in flags if int(active or 0) == 1]
+        st.write("**TRAP-lite flags:**", ", ".join(active_flags) if active_flags else "None")
 
-        # Top Risks
-        top_risks = report.get("top_risks", [])
-        st.markdown("### Top Risks")
-        if top_risks:
-            risk_df = pd.DataFrame(top_risks)
-            display_cols = [
+        hits = _safe_get(f"/pois/{selected['id']}/hits", params={"days": 30}) or []
+        st.markdown("### Timeline Hits (30 days)")
+        if hits:
+            df = pd.DataFrame(hits)
+            cols = [
                 c
-                for c in ["title", "risk_score", "severity", "source_name", "keyword"]
-                if c in risk_df.columns
+                for c in [
+                    "timestamp",
+                    "alert_id",
+                    "match_type",
+                    "match_value",
+                    "match_score",
+                    "ors_score",
+                    "tas_score",
+                    "title",
+                ]
+                if c in df.columns
             ]
-            if display_cols:
-                st.dataframe(
-                    risk_df[display_cols].rename(
-                        columns={
-                            "title": "Title",
-                            "risk_score": "Risk Score",
-                            "severity": "Severity",
-                            "source_name": "Source",
-                            "keyword": "Keyword",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            st.dataframe(df[cols], use_container_width=True, hide_index=True)
+            excerpts = [h.get("context") for h in hits if h.get("context")]
+            if excerpts:
+                st.markdown("**Evidence excerpts**")
+                for snippet in excerpts[:3]:
+                    st.code(snippet, language="text")
         else:
-            st.info("No alerts found for this date.")
+            st.info("No POI hits found in the selected window.")
 
-        st.divider()
+with tab_facilities:
+    st.subheader("Facility Watch")
+    locations = _safe_get("/locations/protected") or []
+    if not locations:
+        st.info("No protected locations configured.")
+    else:
+        location_map = {loc["name"]: loc for loc in locations}
+        selected_name = st.selectbox("Protected location", list(location_map.keys()))
+        selected = location_map[selected_name]
+        days = st.slider("Days", 1, 30, 7)
+        min_ors = st.slider("Minimum ORS", 0.0, 100.0, 60.0, 5.0)
 
-        st.markdown("### Top Entities (Last 24h)")
-        top_entities = report.get("top_entities", [])
-        if top_entities:
-            entity_df = pd.DataFrame(top_entities)
-            st.dataframe(
-                entity_df.rename(
-                    columns={"type": "Type", "value": "Entity", "mention_count": "Mentions"}
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info("No extracted entities for this period.")
+        alerts = _safe_get(
+            f"/locations/protected/{selected['id']}/alerts",
+            params={"days": days, "min_ors": min_ors},
+        ) or []
 
-        st.markdown("### New CVEs (Last 24h)")
-        new_cves = report.get("new_cves", [])
-        if new_cves:
-            st.code("\n".join(new_cves), language="text")
-        else:
-            st.info("No CVEs extracted for this period.")
-
-        st.divider()
-
-        # Emerging Themes
-        themes = report.get("emerging_themes", [])
-        st.markdown("### Emerging Themes (Frequency Spikes)")
-        if themes:
-            themes_df = pd.DataFrame(themes)
-            fig_themes = px.bar(
-                themes_df,
-                x="term",
-                y="spike_ratio",
-                color="spike_ratio",
-                color_continuous_scale="OrRd",
-                labels={"term": "Keyword", "spike_ratio": "Spike Ratio (vs 7d avg)"},
-            )
-            fig_themes.update_layout(height=350)
-            st.plotly_chart(fig_themes, use_container_width=True)
-        else:
-            st.info(
-                "No keyword spikes detected. Spike detection requires 3+ days of scraping data."
-            )
-
-        # Active Threat Actors
-        actors = report.get("active_threat_actors", [])
-        st.markdown("### Active Threat Actors")
-        if actors:
-            for actor in actors:
-                known = ", ".join(a["name"] for a in actor.get("known_actors", []))
-                line = f"- **{actor['keyword']}**: {actor['mentions']} mention(s)"
-                if known:
-                    line += f" — linked to: {known}"
-                st.markdown(line)
-        else:
-            st.info("No threat actor activity detected for this period.")
-
-    except requests.ConnectionError:
-        st.error("Cannot connect to API.")
-    except Exception as e:
-        st.error(f"Error generating report: {e}")
-
-
-# ============================================================
-# TAB 3: ALERT FEED (with TP/FP classification)
-# ============================================================
-with tab_alerts:
-    st.subheader("Alert Feed")
-
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
-    with filter_col1:
-        severity_filter = st.selectbox(
-            "Filter by Severity", ["All", "critical", "high", "medium", "low"]
-        )
-    with filter_col2:
-        review_filter = st.selectbox("Filter by Status", ["All", "Unreviewed", "Reviewed"])
-    with filter_col3:
-        min_score = st.slider("Minimum Risk Score", 0.0, 100.0, 0.0, 5.0)
-
-    params = {"limit": 100, "sort_by": "risk_score"}
-    if severity_filter != "All":
-        params["severity"] = severity_filter
-    if review_filter == "Unreviewed":
-        params["reviewed"] = 0
-    elif review_filter == "Reviewed":
-        params["reviewed"] = 1
-    if min_score > 0:
-        params["min_score"] = min_score
-
-    try:
-        alerts = requests.get(f"{API_URL}/alerts", params=params).json()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Type", selected.get("type") or "N/A")
+        c2.metric("Radius (mi)", selected.get("radius_miles") or "N/A")
+        c3.metric("Nearby alerts", len(alerts))
 
         if alerts:
-            for alert in alerts:
-                severity = alert["severity"]
-                icon = SEVERITY_ICONS.get(severity, "⚪")
-                reviewed_tag = "✅" if alert["reviewed"] else "🔲"
-                score = alert.get("risk_score", 0) or 0
-                dup_tag = " [DUP]" if alert.get("duplicate_of") else ""
-
-                with st.expander(
-                    f"{icon} {reviewed_tag} [{severity.upper()} {score:.0f}]{dup_tag} {alert['title'][:100]}"
-                ):
-                    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-                    mc1.write(f"**Risk Score:** {score:.1f}")
-                    mc2.write(f"**Source:** {alert.get('source_name', 'Unknown')}")
-                    mc3.write(f"**Keyword:** {alert.get('matched_term', 'N/A')}")
-                    mc4.write(f"**Published:** {alert.get('published_at') or 'Unknown'}")
-                    mc5.write(f"**Ingested:** {alert['created_at']}")
-
-                    if alert.get("duplicate_of"):
-                        st.caption(f"Duplicate of alert #{alert['duplicate_of']}")
-
-                    if alert.get("url"):
-                        st.write(f"**URL:** {alert['url']}")
-                    if alert.get("content"):
-                        st.write(f"**Content:** {alert['content'][:500]}...")
-
-                    # Score breakdown
-                    try:
-                        score_data = requests.get(
-                            f"{API_URL}/alerts/{alert['id']}/score",
-                            params={"uncertainty": 1, "n": 500},
-                        ).json()
-                        if "keyword_weight" in score_data:
-                            interval = score_data.get("uncertainty") or {}
-                            if interval.get("p05") is not None and interval.get("p95") is not None:
-                                score_center = score_data.get("final_score", score)
-                                st.markdown(
-                                    f"**Risk Score:** {score_center:.1f} "
-                                    f"(p05={interval['p05']:.1f} / p95={interval['p95']:.1f})"
-                                )
-                            st.markdown("**Score Breakdown:**")
-                            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-                            sc1.metric("Keyword Weight", f"{score_data['keyword_weight']:.1f}")
-                            sc2.metric(
-                                "Source Credibility", f"{score_data['source_credibility']:.2f}"
-                            )
-                            sc3.metric("Frequency Factor", f"{score_data['frequency_factor']:.1f}x")
-                            sc4.metric("Z-Score", f"{score_data.get('z_score', 0):.2f}")
-                            sc5.metric("Recency Factor", f"{score_data['recency_factor']:.2f}")
-                            if interval.get("p05") is not None:
-                                uc1, uc2, uc3, uc4 = st.columns(4)
-                                uc1.metric("MC P05", f"{interval['p05']:.1f}")
-                                uc2.metric("MC P50", f"{interval['p50']:.1f}")
-                                uc3.metric("MC P95", f"{interval['p95']:.1f}")
-                                uc4.metric("MC Std", f"{interval['std']:.2f}")
-                    except Exception:
-                        pass
-
-                    # Extracted entities + IOCs
-                    try:
-                        entities = requests.get(f"{API_URL}/alerts/{alert['id']}/entities").json()
-                        iocs = requests.get(f"{API_URL}/alerts/{alert['id']}/iocs").json()
-                        if entities:
-                            st.markdown("**Entities:**")
-                            chips = " ".join(
-                                f"`{item.get('entity_type', 'unknown')}: {item.get('entity_value', '')}`"
-                                for item in entities[:30]
-                            )
-                            st.markdown(chips)
-                        if iocs:
-                            st.markdown("**IOCs:**")
-                            ioc_df = pd.DataFrame(iocs)
-                            cols = [c for c in ["type", "value"] if c in ioc_df.columns]
-                            if cols:
-                                st.dataframe(
-                                    ioc_df[cols].rename(
-                                        columns={
-                                            "type": "Type",
-                                            "value": "Value",
-                                        }
-                                    ),
-                                    use_container_width=True,
-                                    hide_index=True,
-                                )
-                    except Exception:
-                        pass
-
-                    # Action buttons: Review + Classify
-                    if not alert["reviewed"]:
-                        btn_col1, btn_col2, btn_col3 = st.columns(3)
-                        with btn_col1:
-                            if st.button("Mark Reviewed", key=f"review_{alert['id']}"):
-                                requests.patch(f"{API_URL}/alerts/{alert['id']}/review")
-                                st.rerun()
-                        with btn_col2:
-                            if st.button("✅ True Positive", key=f"tp_{alert['id']}"):
-                                requests.patch(
-                                    f"{API_URL}/alerts/{alert['id']}/classify",
-                                    json={"classification": "true_positive"},
-                                )
-                                st.rerun()
-                        with btn_col3:
-                            if st.button("❌ False Positive", key=f"fp_{alert['id']}"):
-                                requests.patch(
-                                    f"{API_URL}/alerts/{alert['id']}/classify",
-                                    json={"classification": "false_positive"},
-                                )
-                                st.rerun()
-        else:
-            st.info("No alerts found matching your filters.")
-
-    except requests.ConnectionError:
-        st.error("Cannot connect to API.")
-
-
-# ============================================================
-# TAB 4: ANALYTICS
-# ============================================================
-with tab_analytics:
-    st.subheader("Threat Analytics")
-
-    # Spike Detection
-    st.markdown("### Keyword Frequency Spikes")
-    try:
-        spikes = requests.get(f"{API_URL}/analytics/spikes", params={"threshold": 1.5}).json()
-        if spikes:
-            spike_df = pd.DataFrame(spikes)
-            fig_spike = px.bar(
-                spike_df,
-                x="term",
-                y="spike_ratio",
-                color="today_count",
-                color_continuous_scale="Reds",
-                labels={
-                    "term": "Keyword",
-                    "spike_ratio": "Spike Ratio",
-                    "today_count": "Today's Count",
-                },
-                title="Active Keyword Spikes (vs 7-day average)",
-            )
-            fig_spike.update_layout(height=400)
-            st.plotly_chart(fig_spike, use_container_width=True)
-
-            # Show z-score column in table
-            display_cols = [
-                c
-                for c in ["term", "category", "today_count", "avg_7d", "spike_ratio", "z_score"]
-                if c in spike_df.columns
-            ]
-            st.dataframe(
-                spike_df[display_cols].rename(
-                    columns={
-                        "term": "Keyword",
-                        "category": "Category",
-                        "today_count": "Today",
-                        "avg_7d": "7d Avg",
-                        "spike_ratio": "Spike Ratio",
-                        "z_score": "Z-Score",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        else:
-            st.info(
-                "No keyword spikes detected above threshold. Spike detection requires 3+ days of scraping history."
-            )
-    except Exception as e:
-        st.error(f"Error loading spike data: {e}")
-
-    st.divider()
-
-    # Keyword Trend Explorer
-    st.markdown("### Keyword Trend Explorer")
-    try:
-        keywords = requests.get(f"{API_URL}/keywords").json()
-        if keywords:
-            kw_options = {k["term"]: k["id"] for k in keywords}
-            selected_term = st.selectbox("Select Keyword", list(kw_options.keys()))
-            if selected_term:
-                trend = requests.get(
-                    f"{API_URL}/analytics/keyword-trend/{kw_options[selected_term]}",
-                    params={"days": 14},
-                ).json()
-                if trend:
-                    trend_df = pd.DataFrame(trend)
-                    fig_trend = px.line(
-                        trend_df,
-                        x="date",
-                        y="count",
-                        title=f"Daily frequency: {selected_term}",
-                        markers=True,
-                    )
-                    fig_trend.update_layout(height=350)
-                    st.plotly_chart(fig_trend, use_container_width=True)
-                else:
-                    st.info("No frequency data yet for this keyword. Run the scraper to populate.")
-    except Exception as e:
-        st.error(f"Error loading trend data: {e}")
-
-    st.divider()
-
-    # Source Credibility Overview
-    st.markdown("### Source Credibility Ratings")
-    try:
-        sources = requests.get(f"{API_URL}/sources").json()
-        if sources:
-            source_df = pd.DataFrame(sources)
-            if "credibility_score" in source_df.columns:
-                source_df = source_df.sort_values("credibility_score", ascending=True)
-                fig_cred = px.bar(
-                    source_df,
-                    x="credibility_score",
-                    y="name",
-                    orientation="h",
-                    color="credibility_score",
-                    color_continuous_scale="Greens",
-                    labels={"credibility_score": "Credibility Score", "name": "Source"},
-                    title="Intelligence Source Credibility",
-                )
-                fig_cred.update_layout(height=350)
-                st.plotly_chart(fig_cred, use_container_width=True)
-    except Exception as e:
-        st.error(f"Error loading source data: {e}")
-
-
-# ============================================================
-# TAB 5: FORECAST
-# ============================================================
-with tab_forecast:
-    st.subheader("Keyword Frequency Forecast")
-    try:
-        keywords = requests.get(f"{API_URL}/keywords").json()
-        if keywords:
-            kw_options = {k["term"]: k["id"] for k in keywords}
-            selected_term = st.selectbox("Keyword", list(kw_options.keys()), key="forecast_keyword")
-            horizon = st.slider("Horizon (days)", min_value=1, max_value=14, value=7)
-            forecast_payload = requests.get(
-                f"{API_URL}/analytics/forecast/keyword/{kw_options[selected_term]}",
-                params={"horizon": horizon},
-            ).json()
-            forecast = forecast_payload.get("forecast", [])
-            history = forecast_payload.get("history", [])
-            quality = forecast_payload.get("quality", {})
-            if forecast:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Method", forecast_payload.get("method") or forecast[0].get("method", "unknown"))
-                c2.metric(
-                    "SMAPE",
-                    f"{quality.get('smape', 0):.2f}" if quality.get("smape") is not None else "N/A",
-                )
-                c3.metric("Train Days", quality.get("n_train_days", 0))
-
-                hist_df = pd.DataFrame(history)
-                hist_df["series"] = "history"
-                fcst_df = pd.DataFrame(forecast).rename(columns={"yhat": "count"})
-                fcst_df["series"] = "forecast"
-                chart_df = pd.concat(
-                    [
-                        hist_df[["date", "count", "series"]],
-                        fcst_df[["date", "count", "series"]],
-                    ],
-                    ignore_index=True,
-                )
-                fig = px.line(chart_df, x="date", y="count", color="series", markers=True)
-                fig.add_trace(
-                    go.Scatter(
-                        x=fcst_df["date"],
-                        y=fcst_df["lo"],
-                        mode="lines",
-                        line={"width": 1, "dash": "dash", "color": "#94a3b8"},
-                        name="Forecast Lo",
-                    )
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=fcst_df["date"],
-                        y=fcst_df["hi"],
-                        mode="lines",
-                        line={"width": 1, "dash": "dash", "color": "#94a3b8"},
-                        name="Forecast Hi",
-                    )
-                )
-                st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(fcst_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No keywords found.")
-    except Exception as e:
-        st.error(f"Forecast error: {e}")
-
-
-# ============================================================
-# TAB 6: GRAPH
-# ============================================================
-with tab_graph:
-    st.subheader("Link Analysis Graph")
-    days = st.slider("Days", min_value=1, max_value=30, value=7)
-    min_score = st.slider("Minimum score", min_value=0.0, max_value=100.0, value=70.0, step=1.0)
-    limit_alerts = st.slider("Alert limit", min_value=50, max_value=1000, value=500, step=50)
-    try:
-        graph_data = requests.get(
-            f"{API_URL}/analytics/graph",
-            params={"days": days, "min_score": min_score, "limit_alerts": limit_alerts},
-        ).json()
-        nodes = graph_data.get("nodes", [])
-        edges = graph_data.get("edges", [])
-        c1, c2 = st.columns(2)
-        c1.metric("Nodes", len(nodes))
-        c2.metric("Edges", len(edges))
-        if edges:
-            edge_df = pd.DataFrame(edges).head(100)
-            st.markdown("### Top Edges")
-            st.dataframe(edge_df, use_container_width=True, hide_index=True)
-
-            degree = {}
-            for edge in edges:
-                degree[edge["source"]] = degree.get(edge["source"], 0) + edge["weight"]
-                degree[edge["target"]] = degree.get(edge["target"], 0) + edge["weight"]
-            degree_df = (
-                pd.DataFrame(
-                    [{"node": node, "weighted_degree": weight} for node, weight in degree.items()]
-                )
-                .sort_values("weighted_degree", ascending=False)
-                .head(50)
-            )
-            st.markdown("### Degree Centrality (Weighted)")
-            st.dataframe(degree_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("Graph is empty for current filters.")
-    except Exception as e:
-        st.error(f"Graph error: {e}")
-
-
-# ============================================================
-# TAB 7: SCORING & EVALUATION
-# ============================================================
-with tab_scoring:
-    st.subheader("Scoring Model & Evaluation Metrics")
-
-    # --- Bayesian vs Static Credibility ---
-    st.markdown("### Bayesian vs Static Source Credibility")
-    try:
-        sources = requests.get(f"{API_URL}/sources").json()
-        if sources:
-            cred_data = []
-            for src in sources:
-                alpha = src.get("bayesian_alpha", 2.0) or 2.0
-                beta_val = src.get("bayesian_beta", 2.0) or 2.0
-                bayesian_cred = round(alpha / (alpha + beta_val), 4)
-                static_cred = src.get("credibility_score", 0.5) or 0.5
-                cred_data.append(
-                    {
-                        "Source": src["name"],
-                        "Static Credibility": static_cred,
-                        "Bayesian Credibility": bayesian_cred,
-                        "Alpha": alpha,
-                        "Beta": beta_val,
-                        "TP": src.get("true_positives", 0) or 0,
-                        "FP": src.get("false_positives", 0) or 0,
-                    }
-                )
-
-            cred_df = pd.DataFrame(cred_data)
-            fig_cred = go.Figure()
-            fig_cred.add_trace(
-                go.Bar(
-                    name="Static",
-                    x=cred_df["Source"],
-                    y=cred_df["Static Credibility"],
-                    marker_color="#94a3b8",
-                )
-            )
-            fig_cred.add_trace(
-                go.Bar(
-                    name="Bayesian",
-                    x=cred_df["Source"],
-                    y=cred_df["Bayesian Credibility"],
-                    marker_color="#f97316",
-                )
-            )
-            fig_cred.update_layout(
-                barmode="group",
-                height=400,
-                yaxis_title="Credibility Score",
-                title="Static vs Bayesian Credibility by Source",
-            )
-            st.plotly_chart(fig_cred, use_container_width=True)
-
-            st.dataframe(cred_df, use_container_width=True, hide_index=True)
-    except Exception as e:
-        st.error(f"Error loading credibility data: {e}")
-
-    st.divider()
-
-    # --- Precision / Recall / F1 ---
-    st.markdown("### Precision / Recall (Est.) / F1 by Source")
-    st.caption(
-        "Recall is estimated: FN = reviewed - TP - FP. "
-        "Classify all reviewed alerts as TP/FP for accurate recall."
-    )
-    try:
-        eval_data = requests.get(f"{API_URL}/analytics/evaluation").json()
-        if eval_data:
-            eval_df = pd.DataFrame(eval_data)
-            display_cols = [
+            df = pd.DataFrame(alerts)
+            cols = [
                 c
                 for c in [
-                    "source_name",
-                    "true_positives",
-                    "false_positives",
-                    "total_reviewed",
-                    "precision",
-                    "recall_estimated",
-                    "f1_score",
-                    "bayesian_credibility",
+                    "timestamp",
+                    "id",
+                    "title",
+                    "ors_score",
+                    "tas_score",
+                    "distance_miles",
+                    "within_radius",
+                    "location_text",
                 ]
-                if c in eval_df.columns
+                if c in df.columns
             ]
-            if display_cols:
-                st.dataframe(
-                    eval_df[display_cols].rename(
-                        columns={
-                            "source_name": "Source",
-                            "true_positives": "TP",
-                            "false_positives": "FP",
-                            "total_reviewed": "Reviewed",
-                            "precision": "Precision",
-                            "recall_estimated": "Recall (Est.)",
-                            "f1_score": "F1 Score",
-                            "bayesian_credibility": "Bayesian Cred",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                # Grouped bar chart for P/R/F1
-                recall_col = "recall_estimated" if "recall_estimated" in eval_df.columns else "recall"
-                if len(eval_df) > 0:
-                    fig_prf = go.Figure()
-                    fig_prf.add_trace(
-                        go.Bar(
-                            name="Precision",
-                            x=eval_df["source_name"],
-                            y=eval_df["precision"],
-                            marker_color="#22c55e",
-                        )
-                    )
-                    fig_prf.add_trace(
-                        go.Bar(
-                            name="Recall (Est.)",
-                            x=eval_df["source_name"],
-                            y=eval_df[recall_col],
-                            marker_color="#3b82f6",
-                        )
-                    )
-                    fig_prf.add_trace(
-                        go.Bar(
-                            name="F1",
-                            x=eval_df["source_name"],
-                            y=eval_df["f1_score"],
-                            marker_color="#f97316",
-                        )
-                    )
-                    fig_prf.update_layout(
-                        barmode="group", height=400, title="Evaluation Metrics by Source"
-                    )
-                    st.plotly_chart(fig_prf, use_container_width=True)
+            st.dataframe(df[cols], use_container_width=True, hide_index=True)
         else:
-            st.info(
-                "No evaluation data yet. Classify alerts as TP/FP in the Alert Feed to generate metrics."
+            st.info("No nearby alerts match current filters.")
+
+with tab_map:
+    st.subheader("Protected Locations + Recent Alert Locations")
+    days = st.slider("Map days", 1, 30, 7, key="map_days")
+    min_ors = st.slider("Map min ORS", 0.0, 100.0, 60.0, 5.0, key="map_ors")
+
+    points = _safe_get("/analytics/map", params={"days": days, "min_ors": min_ors}) or {}
+    protected = points.get("protected_locations", [])
+    alerts = points.get("alerts", [])
+
+    fig = go.Figure()
+    if protected:
+        fig.add_trace(
+            go.Scattergeo(
+                lat=[row["lat"] for row in protected],
+                lon=[row["lon"] for row in protected],
+                text=[row["name"] for row in protected],
+                mode="markers",
+                marker={"size": 11, "color": "green"},
+                name="Protected",
             )
-    except Exception as e:
-        st.error(f"Error loading evaluation data: {e}")
-
-    st.divider()
-
-    # --- Backtest Results ---
-    st.markdown("### Backtest: Full Scoring vs Baseline")
-    try:
-        backtest = requests.get(f"{API_URL}/analytics/backtest").json()
-        agg = backtest.get("aggregate", {})
-
-        bc1, bc2, bc3, bc4 = st.columns(4)
-        bc1.metric("Baseline Detection Rate", f"{agg.get('baseline_detection_rate', 0):.0%}")
-        bc2.metric("Full Model Detection Rate", f"{agg.get('full_detection_rate', 0):.0%}")
-        bc3.metric("Baseline Mean Score", f"{agg.get('baseline_mean_score', 0):.1f}")
-        bc4.metric("Full Mean Score", f"{agg.get('full_mean_score', 0):.1f}")
-
-        incidents = backtest.get("incidents", [])
-        if incidents:
-            bt_df = pd.DataFrame(incidents)
-            display_cols = [
-                c
-                for c in [
-                    "incident",
-                    "expected_severity",
-                    "baseline_score",
-                    "baseline_severity",
-                    "full_score",
-                    "full_severity",
-                    "score_improvement",
-                ]
-                if c in bt_df.columns
-            ]
-            st.dataframe(
-                bt_df[display_cols].rename(
-                    columns={
-                        "incident": "Incident",
-                        "expected_severity": "Expected",
-                        "baseline_score": "Baseline Score",
-                        "baseline_severity": "Baseline Severity",
-                        "full_score": "Full Score",
-                        "full_severity": "Full Severity",
-                        "score_improvement": "Improvement",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
+        )
+    if alerts:
+        fig.add_trace(
+            go.Scattergeo(
+                lat=[row["lat"] for row in alerts],
+                lon=[row["lon"] for row in alerts],
+                text=[f"#{row['id']} ORS={row.get('ors_score', 0):.1f} {row['title'][:70]}" for row in alerts],
+                mode="markers",
+                marker={"size": 8, "color": "red"},
+                name="Alerts",
             )
+        )
 
-            # Chart: baseline vs full scores
-            fig_bt = go.Figure()
-            fig_bt.add_trace(
-                go.Bar(
-                    name="Baseline",
-                    x=bt_df["incident"],
-                    y=bt_df["baseline_score"],
-                    marker_color="#94a3b8",
-                )
-            )
-            fig_bt.add_trace(
-                go.Bar(
-                    name="Full Model",
-                    x=bt_df["incident"],
-                    y=bt_df["full_score"],
-                    marker_color="#f97316",
-                )
-            )
-            fig_bt.update_layout(
-                barmode="group",
-                height=450,
-                title="Baseline vs Full Scoring Model — Golden Dataset",
-                yaxis_title="Risk Score",
-                xaxis_tickangle=-30,
-            )
-            st.plotly_chart(fig_bt, use_container_width=True)
+    fig.update_layout(height=520, geo=dict(scope="world", showcountries=True, showland=True))
+    st.plotly_chart(fig, use_container_width=True)
 
-    except Exception as e:
-        st.error(f"Error loading backtest data: {e}")
+with tab_travel:
+    st.subheader("Travel Brief Generator")
+    with st.form("travel_brief_form"):
+        destination = st.text_input("Destination", value="San Francisco, CA")
+        start_dt = st.date_input("Start date", value=date.today())
+        end_dt = st.date_input("End date", value=date.today() + timedelta(days=3))
+        submitted = st.form_submit_button("Generate Brief")
 
-
-# ============================================================
-# TAB 8: PERFORMANCE
-# ============================================================
-with tab_perf:
-    st.subheader("Scraping Performance & Deduplication")
-
-    # --- Scrape Run History ---
-    st.markdown("### Scrape Run History")
-    try:
-        perf_data = requests.get(f"{API_URL}/analytics/performance", params={"limit": 20}).json()
-        if perf_data:
-            perf_df = pd.DataFrame(perf_data)
-            display_cols = [
-                c
-                for c in [
-                    "started_at",
-                    "scraper_type",
-                    "total_alerts",
-                    "duration_seconds",
-                    "alerts_per_second",
-                    "status",
-                ]
-                if c in perf_df.columns
-            ]
-            st.dataframe(
-                perf_df[display_cols].rename(
-                    columns={
-                        "started_at": "Started",
-                        "scraper_type": "Scraper",
-                        "total_alerts": "Alerts",
-                        "duration_seconds": "Duration (s)",
-                        "alerts_per_second": "Alerts/sec",
-                        "status": "Status",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            # Duration trend
-            if len(perf_df) > 1 and "duration_seconds" in perf_df.columns:
-                fig_dur = px.line(
-                    perf_df.sort_values("started_at"),
-                    x="started_at",
-                    y="duration_seconds",
-                    title="Scrape Duration Over Time",
-                    markers=True,
-                )
-                fig_dur.update_layout(height=350, xaxis_title="Run", yaxis_title="Duration (s)")
-                st.plotly_chart(fig_dur, use_container_width=True)
-
-            # Alerts per second trend
-            if len(perf_df) > 1 and "alerts_per_second" in perf_df.columns:
-                fig_aps = px.line(
-                    perf_df.sort_values("started_at"),
-                    x="started_at",
-                    y="alerts_per_second",
-                    title="Alerts per Second Over Time",
-                    markers=True,
-                    color_discrete_sequence=["#f97316"],
-                )
-                fig_aps.update_layout(height=350, xaxis_title="Run", yaxis_title="Alerts/sec")
-                st.plotly_chart(fig_aps, use_container_width=True)
-        else:
-            st.info("No scrape runs recorded yet. Run the scraper to generate performance data.")
-    except Exception as e:
-        st.error(f"Error loading performance data: {e}")
-
-    st.divider()
-
-    # --- Deduplication Stats ---
-    st.markdown("### Content Deduplication")
-    try:
-        dedup_data = requests.get(f"{API_URL}/analytics/duplicates").json()
-
-        dc1, dc2, dc3, dc4 = st.columns(4)
-        dc1.metric("Total Alerts", dedup_data.get("total_alerts", 0))
-        dc2.metric("Unique Alerts", dedup_data.get("unique_alerts", 0))
-        dc3.metric("Duplicates", dedup_data.get("duplicates", 0))
-        dc4.metric("Dedup Ratio", f"{dedup_data.get('dedup_ratio', 0):.1%}")
-
-        clusters = dedup_data.get("top_clusters", [])
-        if clusters:
-            st.markdown("**Top Duplicate Clusters:**")
-            cluster_df = pd.DataFrame(clusters)
-            display_cols = [c for c in ["title", "dup_count"] if c in cluster_df.columns]
-            st.dataframe(
-                cluster_df[display_cols].rename(
-                    columns={
-                        "title": "Original Alert",
-                        "dup_count": "Duplicate Count",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-    except Exception as e:
-        st.error(f"Error loading dedup data: {e}")
-
-
-# ============================================================
-# TAB 9: CONFIGURATION
-# ============================================================
-with tab_config:
-    st.subheader("Configuration")
-
-    # --- Keyword Management ---
-    st.markdown("### Keyword Management")
-
-    with st.form("add_keyword"):
-        kc1, kc2, kc3 = st.columns(3)
-        with kc1:
-            new_term = st.text_input("New Keyword")
-        with kc2:
-            new_category = st.selectbox(
-                "Category",
-                [
-                    "general",
-                    "malware",
-                    "incident",
-                    "vulnerability",
-                    "threat_actor",
-                    "poi",
-                    "tactics",
-                    "financial",
-                ],
-            )
-        with kc3:
-            new_weight = st.slider("Threat Weight", 0.1, 5.0, 1.0, 0.1)
-        submitted = st.form_submit_button("Add Keyword")
-        if submitted and new_term:
-            resp = requests.post(
-                f"{API_URL}/keywords",
-                json={"term": new_term, "category": new_category, "weight": new_weight},
-            )
-            if resp.status_code == 200:
-                st.success(f"Added keyword: {new_term} (weight: {new_weight})")
-                st.rerun()
-            else:
-                st.error("Keyword already exists or error occurred.")
-
-    try:
-        keywords = requests.get(f"{API_URL}/keywords").json()
-        if keywords:
-            kw_df = pd.DataFrame(keywords)
-            display_cols = [
-                c for c in ["id", "term", "category", "weight", "active"] if c in kw_df.columns
-            ]
-            st.dataframe(kw_df[display_cols], use_container_width=True, hide_index=True)
-    except Exception:
-        pass
-
-    st.divider()
-
-    # --- POI Watchlist ---
-    st.markdown("### POI Watchlist")
-    st.caption("Add person-of-interest names and aliases as keyword terms (category: poi).")
-
-    with st.form("add_poi_term"):
-        pc1, pc2 = st.columns([3, 1])
-        with pc1:
-            poi_term = st.text_input("POI Term / Alias")
-        with pc2:
-            poi_weight = st.slider("POI Weight", 0.1, 5.0, 4.0, 0.1)
-        poi_submitted = st.form_submit_button("Add POI")
-        if poi_submitted and poi_term:
-            resp = requests.post(
-                f"{API_URL}/keywords",
-                json={"term": poi_term, "category": "poi", "weight": poi_weight},
-            )
-            if resp.status_code == 200:
-                st.success(f"Added POI term: {poi_term} (weight: {poi_weight})")
-                st.rerun()
-            else:
-                st.error("POI term already exists or could not be added.")
-
-    try:
-        keywords = requests.get(f"{API_URL}/keywords").json()
-        poi_keywords = [k for k in keywords if k.get("category") == "poi"]
-        if poi_keywords:
-            poi_df = pd.DataFrame(poi_keywords)
-            st.dataframe(
-                poi_df[[c for c in ["id", "term", "weight", "active"] if c in poi_df.columns]].rename(
-                    columns={"id": "ID", "term": "Term", "weight": "Weight", "active": "Active"}
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-            remove_map = {f"{k['term']} (id={k['id']})": k["id"] for k in poi_keywords}
-            selected_remove = st.selectbox("Remove POI term", ["None"] + list(remove_map.keys()))
-            if selected_remove != "None":
-                if st.button("Remove Selected POI"):
-                    keyword_id = remove_map[selected_remove]
-                    resp = requests.delete(f"{API_URL}/keywords/{keyword_id}")
-                    if resp.status_code == 200:
-                        st.success("POI term removed.")
-                        st.rerun()
-                    else:
-                        st.error("Could not remove POI term.")
-        else:
-            st.info("No POI terms configured yet.")
-    except Exception:
-        pass
-
-    st.divider()
-
-    # --- Source Credibility ---
-    st.markdown("### Source Credibility")
-    try:
-        sources = requests.get(f"{API_URL}/sources").json()
-        if sources:
-            for src in sources:
-                sc1, sc2 = st.columns([3, 1])
-                cred = src.get("credibility_score", 0.5)
-                tp = src.get("true_positives", 0) or 0
-                fp = src.get("false_positives", 0) or 0
-                sc1.write(
-                    f"**{src['name']}** ({src['source_type']}) — "
-                    f"Credibility: {cred:.2f} | TP: {tp} | FP: {fp}"
-                )
-                sc2.write("")  # spacer
-    except Exception:
-        pass
-
-    st.divider()
-
-    # --- Rescore ---
-    st.markdown("### Re-score Alerts")
-    st.write(
-        "Re-calculate risk scores for all unreviewed alerts using current keyword weights, Bayesian credibility, and Z-score frequency factors."
-    )
-    if st.button("Re-score All Unreviewed Alerts"):
+    if submitted:
+        payload = {
+            "destination": destination,
+            "start_dt": start_dt.strftime("%Y-%m-%d"),
+            "end_dt": end_dt.strftime("%Y-%m-%d"),
+        }
         try:
-            result = requests.post(f"{API_URL}/alerts/rescore").json()
-            st.success(f"Rescored {result['alerts_rescored']} alerts.")
-        except Exception as e:
-            st.error(f"Error: {e}")
+            brief = requests.post(f"{API_URL}/briefs/travel", json=payload, timeout=30).json()
+            st.markdown("### Brief Output")
+            st.markdown(brief.get("content_md", "No brief generated."))
+        except Exception as exc:
+            st.error(f"Brief generation failed: {exc}")
 
-    st.divider()
+    st.markdown("### Recent Briefs")
+    briefs = _safe_get("/briefs/travel", params={"limit": 10}) or []
+    if briefs:
+        st.dataframe(pd.DataFrame(briefs), use_container_width=True, hide_index=True)
 
-    # --- Threat Actors ---
-    st.markdown("### Known Threat Actors")
-    try:
-        actors = requests.get(f"{API_URL}/threat-actors").json()
-        if actors:
-            actor_df = pd.DataFrame(actors)
-            display_cols = [c for c in ["name", "aliases", "description"] if c in actor_df.columns]
-            st.dataframe(actor_df[display_cols], use_container_width=True, hide_index=True)
-    except Exception:
-        pass
+with tab_report:
+    st.subheader("EP Daily Intelligence Report")
+    report_date = st.date_input("Report date", value=date.today(), key="report_date")
+    report = _safe_get("/intelligence/daily", params={"date": report_date.strftime("%Y-%m-%d")}) or {}
+
+    st.markdown("### Executive Summary")
+    st.info(report.get("executive_summary", "No report content."))
+
+    stats = report.get("stats", {})
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total alerts", stats.get("total_alerts", 0))
+    c2.metric("Critical", stats.get("critical_count", 0))
+    c3.metric("High", stats.get("high_count", 0))
+    c4.metric("Medium", stats.get("medium_count", 0))
+
+    st.markdown("### Protectee Status")
+    protectee_status = report.get("protectee_status", [])
+    if protectee_status:
+        st.dataframe(pd.DataFrame(protectee_status), use_container_width=True, hide_index=True)
+    else:
+        st.info("No protectee escalations in this window.")
+
+    st.markdown("### Facility Watch")
+    facility_watch = report.get("facility_watch", [])
+    if facility_watch:
+        st.dataframe(pd.DataFrame(facility_watch), use_container_width=True, hide_index=True)
+    else:
+        st.info("No facility proximity alerts in this window.")
+
+    st.markdown("### Upcoming Events / Travel (7d)")
+    upcoming = report.get("upcoming_events", [])
+    if upcoming:
+        st.dataframe(pd.DataFrame(upcoming), use_container_width=True, hide_index=True)
+    else:
+        st.info("No upcoming events configured.")
+
+    st.markdown("### Escalation Recommendations")
+    escalations = report.get("escalation_recommendations", [])
+    if escalations:
+        for item in escalations:
+            st.write(f"- [{item.get('priority', 'MEDIUM')}] {item.get('why', '')}")
+    else:
+        st.info("No escalations.")
+
+with tab_alerts:
+    st.subheader("Legacy Alert Feed")
+    min_score = st.slider("Minimum ORS", 0.0, 100.0, 50.0, 5.0, key="legacy_min")
+    alerts = _safe_get("/alerts", params={"limit": 100, "min_score": min_score, "sort_by": "risk_score"}) or []
+    if not alerts:
+        st.info("No alerts match the filter.")
+    else:
+        for alert in alerts:
+            ors = alert.get("ors_score") if alert.get("ors_score") is not None else alert.get("risk_score", 0.0)
+            tas = alert.get("tas_score", 0.0)
+            with st.expander(f"[{alert.get('severity', 'low').upper()}] ORS={ors:.1f} TAS={tas:.1f} {alert['title'][:100]}"):
+                st.write(f"Source: {alert.get('source_name', 'N/A')}")
+                st.write(f"Keyword: {alert.get('matched_term', 'N/A')}")
+                st.write(f"Published: {alert.get('published_at') or 'Unknown'}")
+                if alert.get("url"):
+                    st.write(alert["url"])
+                if alert.get("content"):
+                    st.write(alert["content"][:500])
+
+                score = _safe_get(f"/alerts/{alert['id']}/score", params={"uncertainty": 1, "n": 500}) or {}
+                interval = score.get("uncertainty") or {}
+                if score:
+                    st.write(
+                        f"ORS={score.get('ors_score', 0):.1f} TAS={score.get('tas_score', 0):.1f} "
+                        f"(p05={interval.get('p05', 'n/a')} p95={interval.get('p95', 'n/a')})"
+                    )
+
+with tab_config:
+    st.subheader("Configuration Snapshot")
+    summary = _safe_get("/alerts/summary") or {}
+    st.json(summary)
+
+    st.markdown("### Keywords")
+    kws = _safe_get("/keywords") or []
+    if kws:
+        st.dataframe(pd.DataFrame(kws), use_container_width=True, hide_index=True)
+
+    st.markdown("### Connector Policy")
+    st.info(
+        "This build ships safe RSS/API collectors. Connectors requiring explicit ToS/legal review "
+        "(Telegram/chans/etc.) are stubbed only and not active."
+    )

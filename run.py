@@ -6,6 +6,8 @@ Usage:
     python run.py scrape      Run all scrapers
     python run.py api         Start FastAPI server
     python run.py dashboard   Start Streamlit dashboard
+    python run.py purge       Purge raw content older than retention window
+    python run.py demo        Load fixtures and generate demo EP artifacts
     python run.py all         Start API + Dashboard (requires separate terminal for each)
 """
 
@@ -15,7 +17,11 @@ import sys
 from database.init_db import (
     init_db,
     migrate_schema,
+    purge_raw_content,
+    seed_default_events,
     seed_default_keywords,
+    seed_default_pois,
+    seed_default_protected_locations,
     seed_default_sources,
     seed_threat_actors,
 )
@@ -34,6 +40,9 @@ def main():
         migrate_schema()
         seed_default_sources()
         seed_default_keywords()
+        seed_default_pois()
+        seed_default_protected_locations()
+        seed_default_events()
         seed_threat_actors()
 
     elif command == "scrape":
@@ -50,6 +59,27 @@ def main():
 
     elif command == "dashboard":
         subprocess.run(["streamlit", "run", "dashboard/app.py", "--server.port", "8501"])
+
+    elif command == "purge":
+        init_db()
+        migrate_schema()
+        purge_raw_content()
+
+    elif command == "demo":
+        from analytics.demo_pack import run_demo_pack
+
+        init_db()
+        migrate_schema()
+        seed_default_sources()
+        seed_default_keywords()
+        seed_default_pois()
+        seed_default_protected_locations()
+        seed_default_events()
+        seed_threat_actors()
+        result = run_demo_pack()
+        print("Demo artifacts generated:")
+        print(f"  - {result['report_path']}")
+        print(f"  - {result['brief_path']}")
 
     elif command == "all":
         print("Run in separate terminals:")

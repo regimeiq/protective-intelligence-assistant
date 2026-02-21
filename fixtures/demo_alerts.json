@@ -1,0 +1,38 @@
+[
+  {
+    "source_name": "Demo EP Feed",
+    "source_url": "https://example.org/demo-ep-feed",
+    "title": "Death threat targeting Jane Doe near Acme HQ in San Francisco, CA",
+    "content": "Investigators flagged a death threat mentioning Jane Doe and plans near Acme HQ in San Francisco, CA tomorrow at 7pm.",
+    "url": "https://example.org/demo/1",
+    "published_at": "2026-02-20 18:10:00",
+    "keyword": {"term": "death threat", "category": "protective_intel", "weight": 5.0}
+  },
+  {
+    "source_name": "Demo EP Feed",
+    "source_url": "https://example.org/demo-ep-feed",
+    "title": "Protest march and blockade announced near Acme NYC Office",
+    "content": "Organizers announced a protest march and blockade near Acme NYC Office next week.",
+    "url": "https://example.org/demo/2",
+    "published_at": "2026-02-20 10:00:00",
+    "keyword": {"term": "blockade", "category": "protest_disruption", "weight": 2.6}
+  },
+  {
+    "source_name": "Demo EP Feed",
+    "source_url": "https://example.org/demo-ep-feed",
+    "title": "Travel advisory and curfew issued for destination city",
+    "content": "A travel advisory and nightly curfew were issued for San Francisco due to unrest and strike activity.",
+    "url": "https://example.org/demo/3",
+    "published_at": "2026-02-19 09:30:00",
+    "keyword": {"term": "curfew", "category": "travel_risk", "weight": 3.2}
+  },
+  {
+    "source_name": "Demo EP Feed",
+    "source_url": "https://example.org/demo-ep-feed",
+    "title": "Doxxing campaign references executive residence",
+    "content": "Posts indicate doxxing of the CEO and mention route access details near residence.",
+    "url": "https://example.org/demo/4",
+    "published_at": "2026-02-20 13:45:00",
+    "keyword": {"term": "doxxing", "category": "protective_intel", "weight": 4.0}
+  }
+]

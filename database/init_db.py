@@ -17,8 +17,8 @@ SOURCE_DEFAULT_CREDIBILITY = {
 
 GDELT_DOC_API_BASE_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 DEFAULT_GDELT_PI_EP_QUERY = (
-    '("threat to CEO" OR swatting OR doxxing OR "death threat" OR kidnapping OR "bomb threat") '
-    'AND (executive OR CEO OR "corporate headquarters" OR "company name")'
+    '("threat to CEO" OR swatting OR doxxing OR "death threat" OR kidnapping OR "bomb threat" OR protest OR unrest) '
+    'AND (executive OR CEO OR headquarters OR office OR venue)'
 )
 
 KEYWORD_CATEGORY_ALIASES = {
@@ -26,12 +26,19 @@ KEYWORD_CATEGORY_ALIASES = {
     "threat_actor": "threat_actor",
     "vulnerabilities": "vulnerability",
     "vulnerability": "vulnerability",
+    "protest": "protest_disruption",
+    "facility_risk": "protective_intel",
     "person_of_interest": "poi",
     "people_of_interest": "poi",
 }
 
 KEYWORD_DEFAULT_WEIGHTS_BY_CATEGORY = {
     "poi": 4.0,
+    "protective_intel": 3.8,
+    "protest_disruption": 2.0,
+    "travel_risk": 2.5,
+    "insider_workplace": 2.5,
+    "ioc": 1.2,
 }
 
 
@@ -115,7 +122,13 @@ def migrate_schema():
         "ALTER TABLE alerts ADD COLUMN content_hash TEXT",
         "ALTER TABLE alerts ADD COLUMN duplicate_of INTEGER",
         "ALTER TABLE alerts ADD COLUMN published_at TIMESTAMP",
+        "ALTER TABLE alerts ADD COLUMN ors_score REAL DEFAULT 0.0",
+        "ALTER TABLE alerts ADD COLUMN tas_score REAL DEFAULT 0.0",
         "ALTER TABLE alert_scores ADD COLUMN z_score REAL DEFAULT 0.0",
+        "ALTER TABLE alert_scores ADD COLUMN category_factor REAL DEFAULT 0.0",
+        "ALTER TABLE alert_scores ADD COLUMN proximity_factor REAL DEFAULT 0.0",
+        "ALTER TABLE alert_scores ADD COLUMN event_factor REAL DEFAULT 0.0",
+        "ALTER TABLE alert_scores ADD COLUMN poi_factor REAL DEFAULT 0.0",
         "ALTER TABLE threat_actors ADD COLUMN alert_count INTEGER DEFAULT 0",
         "ALTER TABLE intelligence_reports ADD COLUMN top_entities TEXT",
         "ALTER TABLE intelligence_reports ADD COLUMN new_cves TEXT",
@@ -127,6 +140,146 @@ def migrate_schema():
             pass  # Column already exists
 
     _migrate_alert_entities_table(conn)
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS pois (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            org TEXT,
+            role TEXT,
+            sensitivity INTEGER DEFAULT 3,
+            active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS poi_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poi_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            alias_type TEXT DEFAULT 'name',
+            active INTEGER DEFAULT 1,
+            UNIQUE(poi_id, alias),
+            FOREIGN KEY (poi_id) REFERENCES pois(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS poi_hits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poi_id INTEGER NOT NULL,
+            alert_id INTEGER NOT NULL,
+            match_type TEXT NOT NULL,
+            match_value TEXT NOT NULL,
+            match_score REAL NOT NULL,
+            context TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(poi_id, alert_id, match_value),
+            FOREIGN KEY (poi_id) REFERENCES pois(id) ON DELETE CASCADE,
+            FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS protected_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            type TEXT,
+            lat REAL,
+            lon REAL,
+            radius_miles REAL DEFAULT 5.0,
+            active INTEGER DEFAULT 1,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS alert_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id INTEGER NOT NULL,
+            location_text TEXT NOT NULL,
+            lat REAL,
+            lon REAL,
+            resolver TEXT,
+            confidence REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS alert_proximity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id INTEGER NOT NULL,
+            protected_location_id INTEGER NOT NULL,
+            distance_miles REAL,
+            within_radius INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(alert_id, protected_location_id),
+            FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE,
+            FOREIGN KEY (protected_location_id) REFERENCES protected_locations(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            type TEXT,
+            start_dt TEXT NOT NULL,
+            end_dt TEXT NOT NULL,
+            city TEXT,
+            country TEXT,
+            venue TEXT,
+            lat REAL,
+            lon REAL,
+            poi_id INTEGER,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (poi_id) REFERENCES pois(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS event_risk_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            computed_at TEXT NOT NULL,
+            ors_mean REAL NOT NULL,
+            ors_p95 REAL NOT NULL,
+            top_drivers_json TEXT,
+            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS dispositions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            rationale TEXT,
+            user TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS retention_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            rows_affected INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS geocode_cache (
+            query TEXT PRIMARY KEY,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            provider TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS poi_assessments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poi_id INTEGER NOT NULL,
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            fixation INTEGER DEFAULT 0,
+            energy_burst INTEGER DEFAULT 0,
+            leakage INTEGER DEFAULT 0,
+            pathway INTEGER DEFAULT 0,
+            targeting_specificity INTEGER DEFAULT 0,
+            tas_score REAL NOT NULL,
+            evidence_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(poi_id, window_start, window_end),
+            FOREIGN KEY (poi_id) REFERENCES pois(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS travel_briefs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            destination TEXT NOT NULL,
+            start_dt TEXT NOT NULL,
+            end_dt TEXT NOT NULL,
+            content_md TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
 
     # Standardize on flat alert_entities storage; remove legacy normalized tables.
     for sql in (
@@ -148,6 +301,13 @@ def migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_keyword_frequency_kw_date ON keyword_frequency(keyword_id, date)",
         "CREATE INDEX IF NOT EXISTS idx_alert_entities_alert ON alert_entities(alert_id)",
         "CREATE INDEX IF NOT EXISTS idx_alert_entities_type_value ON alert_entities(entity_type, entity_value)",
+        "CREATE INDEX IF NOT EXISTS idx_poi_aliases_poi ON poi_aliases(poi_id)",
+        "CREATE INDEX IF NOT EXISTS idx_poi_hits_poi ON poi_hits(poi_id)",
+        "CREATE INDEX IF NOT EXISTS idx_poi_hits_alert ON poi_hits(alert_id)",
+        "CREATE INDEX IF NOT EXISTS idx_alert_locations_alert ON alert_locations(alert_id)",
+        "CREATE INDEX IF NOT EXISTS idx_alert_proximity_alert ON alert_proximity(alert_id)",
+        "CREATE INDEX IF NOT EXISTS idx_events_start_dt ON events(start_dt)",
+        "CREATE INDEX IF NOT EXISTS idx_poi_assessments_poi_window ON poi_assessments(poi_id, window_start, window_end)",
     ]
     for sql in indexes:
         try:
@@ -158,6 +318,8 @@ def migrate_schema():
     conn.execute("UPDATE keywords SET weight = 1.0 WHERE weight IS NULL")
     conn.execute("UPDATE sources SET credibility_score = 0.5 WHERE credibility_score IS NULL")
     conn.execute("UPDATE alerts SET risk_score = 0.0 WHERE risk_score IS NULL")
+    conn.execute("UPDATE alerts SET ors_score = risk_score WHERE ors_score IS NULL OR ors_score = 0.0")
+    conn.execute("UPDATE alerts SET tas_score = 0.0 WHERE tas_score IS NULL")
     conn.execute("UPDATE alerts SET published_at = created_at WHERE published_at IS NULL")
     conn.commit()
     conn.close()
@@ -212,7 +374,14 @@ def load_watchlist_yaml(config_path=None):
     if not isinstance(payload, dict):
         return None
 
-    parsed = {"path": watchlist_path, "sources": [], "keywords": []}
+    parsed = {
+        "path": watchlist_path,
+        "sources": [],
+        "keywords": [],
+        "pois": [],
+        "protected_locations": [],
+        "events": [],
+    }
 
     source_block = payload.get("sources", {})
     if isinstance(source_block, dict):
@@ -250,8 +419,10 @@ def load_watchlist_yaml(config_path=None):
                     }
                 )
 
-    keyword_block = payload.get("keywords", {})
-    if isinstance(keyword_block, dict):
+    def _collect_keywords(keyword_block):
+        collected = []
+        if not isinstance(keyword_block, dict):
+            return collected
         seen_terms = set()
         for raw_category, terms in keyword_block.items():
             if not isinstance(terms, list):
@@ -278,9 +449,86 @@ def load_watchlist_yaml(config_path=None):
                     continue
                 seen_terms.add(dedupe_key)
                 weight = max(0.1, min(5.0, weight))
-                parsed["keywords"].append(
+                collected.append(
                     {"term": term_text, "category": category, "weight": weight}
                 )
+        return collected
+
+    keyword_items = _collect_keywords(payload.get("keywords", {}))
+    cti_items = _collect_keywords(payload.get("cti_optional", {}))
+    parsed["keywords"].extend(keyword_items)
+    existing_terms = {item["term"].lower() for item in parsed["keywords"]}
+    for item in cti_items:
+        if item["term"].lower() in existing_terms:
+            continue
+        parsed["keywords"].append(item)
+        existing_terms.add(item["term"].lower())
+
+    pois = payload.get("pois", [])
+    if isinstance(pois, list):
+        for item in pois:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            aliases = item.get("aliases", [])
+            if not isinstance(aliases, list):
+                aliases = []
+            parsed["pois"].append(
+                {
+                    "name": name,
+                    "org": str(item.get("org", "")).strip() or None,
+                    "role": str(item.get("role", "")).strip() or None,
+                    "sensitivity": int(item.get("sensitivity", 3) or 3),
+                    "aliases": [str(alias).strip() for alias in aliases if str(alias).strip()],
+                }
+            )
+
+    protected_locations = payload.get("protected_locations", [])
+    if isinstance(protected_locations, list):
+        for item in protected_locations:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            parsed["protected_locations"].append(
+                {
+                    "name": name,
+                    "type": str(item.get("type", "")).strip() or None,
+                    "lat": item.get("lat"),
+                    "lon": item.get("lon"),
+                    "radius_miles": item.get("radius_miles", 5.0),
+                    "notes": str(item.get("notes", "")).strip() or None,
+                }
+            )
+
+    events = payload.get("events", [])
+    if isinstance(events, list):
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            start_dt = str(item.get("start_dt", "")).strip()
+            end_dt = str(item.get("end_dt", "")).strip()
+            if not name or not start_dt or not end_dt:
+                continue
+            parsed["events"].append(
+                {
+                    "name": name,
+                    "type": str(item.get("type", "")).strip() or None,
+                    "start_dt": start_dt,
+                    "end_dt": end_dt,
+                    "city": str(item.get("city", "")).strip() or None,
+                    "country": str(item.get("country", "")).strip() or None,
+                    "venue": str(item.get("venue", "")).strip() or None,
+                    "lat": item.get("lat"),
+                    "lon": item.get("lon"),
+                    "poi_name": str(item.get("poi_name", "")).strip() or None,
+                    "notes": str(item.get("notes", "")).strip() or None,
+                }
+            )
 
     return parsed
 
@@ -301,17 +549,18 @@ def seed_default_sources():
         seed_origin = f"config ({watchlist['path']})"
     else:
         sources = [
-            ("CISA Alerts", "https://www.cisa.gov/news.xml", "rss", 1.0),
-            ("Krebs on Security", "https://krebsonsecurity.com/feed/", "rss", 0.85),
-            ("BleepingComputer", "https://www.bleepingcomputer.com/feed/", "rss", 0.8),
+            ("State Dept Travel Alerts/Warnings", "https://travel.state.gov/_res/rss/TAsTWs.xml", "rss", 0.9),
+            ("CDC Travel Health Notices", "https://wwwnc.cdc.gov/travel/rss/notices.xml", "rss", 0.85),
+            ("WHO Disease Outbreak News", "https://www.who.int/feeds/entity/csr/don/en/rss.xml", "rss", 0.85),
             (
                 "GDELT PI/EP Watch",
                 build_gdelt_rss_url(DEFAULT_GDELT_PI_EP_QUERY),
                 "rss",
                 0.6,
             ),
+            ("CISA Alerts", "https://www.cisa.gov/news.xml", "rss", 0.8),
+            ("Krebs on Security", "https://krebsonsecurity.com/feed/", "rss", 0.75),
             ("r/cybersecurity", "https://www.reddit.com/r/cybersecurity/.rss", "reddit", 0.4),
-            ("r/netsec", "https://www.reddit.com/r/netsec/.rss", "reddit", 0.5),
             ("r/threatintel", "https://www.reddit.com/r/threatintel/.rss", "reddit", 0.5),
         ]
         seed_origin = "hardcoded defaults"
@@ -328,6 +577,13 @@ def seed_default_sources():
                 "INSERT INTO sources (name, url, source_type, credibility_score) VALUES (?, ?, ?, ?)",
                 (name, url, source_type, credibility),
             )
+    # Keep demo fixture sources from polluting normal scrape runs.
+    conn.execute(
+        """UPDATE sources
+        SET source_type = 'demo', active = 0
+        WHERE LOWER(name) LIKE 'demo %'
+           OR url LIKE 'https://example.org/demo-%'"""
+    )
     conn.commit()
     conn.close()
     print(f"Default sources seeded from {seed_origin}.")
@@ -344,24 +600,24 @@ def seed_default_keywords():
         seed_origin = f"config ({watchlist['path']})"
     else:
         keywords = [
-            ("ransomware", "malware", 4.5),
-            ("data breach", "incident", 3.5),
-            ("credential leak", "incident", 3.0),
-            ("phishing", "tactics", 2.0),
-            ("zero day", "vulnerability", 5.0),
-            ("APT", "threat_actor", 4.5),
-            ("supply chain attack", "tactics", 4.0),
-            ("CVE", "vulnerability", 2.5),
-            ("DDoS", "tactics", 2.5),
-            ("insider threat", "general", 3.5),
-            ("cryptocurrency fraud", "financial", 2.0),
-            ("dark web", "general", 1.5),
-            ("threat actor", "threat_actor", 3.5),
-            ("exploitation", "vulnerability", 3.5),
-            ("malware", "malware", 4.0),
-            ("nation-state", "threat_actor", 4.5),
-            ("remote code execution", "vulnerability", 4.5),
-            ("privilege escalation", "vulnerability", 3.5),
+            ("death threat", "protective_intel", 5.0),
+            ("swatting", "protective_intel", 4.2),
+            ("doxxing", "protective_intel", 4.0),
+            ("bomb threat", "protective_intel", 5.0),
+            ("active shooter", "protective_intel", 5.0),
+            ("threat to CEO", "protective_intel", 4.8),
+            ("protest", "protest_disruption", 2.1),
+            ("blockade", "protest_disruption", 2.6),
+            ("curfew", "travel_risk", 3.2),
+            ("unrest", "travel_risk", 3.4),
+            ("airport disruption", "travel_risk", 2.8),
+            ("disgruntled", "insider_workplace", 3.3),
+            ("restraining order", "insider_workplace", 4.1),
+            ("ransomware", "malware", 3.0),
+            ("CVE", "ioc", 1.2),
+            ("APT29", "threat_actor", 2.0),
+            ("phishing", "cti_optional", 1.5),
+            ("data breach", "cti_optional", 1.8),
         ]
         seed_origin = "hardcoded defaults"
 
@@ -383,6 +639,166 @@ def seed_default_keywords():
     conn.commit()
     conn.close()
     print(f"Default keywords seeded from {seed_origin}.")
+
+
+def seed_default_pois():
+    conn = get_connection()
+    watchlist = load_watchlist_yaml()
+    if watchlist and watchlist["pois"]:
+        pois = watchlist["pois"]
+        seed_origin = f"config ({watchlist['path']})"
+    else:
+        pois = [
+            {
+                "name": "Jane Doe",
+                "org": "Acme Corporation",
+                "role": "Chief Executive Officer",
+                "sensitivity": 5,
+                "aliases": ["Jane Doe", "J. Doe"],
+            }
+        ]
+        seed_origin = "hardcoded defaults"
+
+    for poi in pois:
+        existing = conn.execute("SELECT id FROM pois WHERE name = ?", (poi["name"],)).fetchone()
+        if existing:
+            poi_id = existing["id"]
+            conn.execute(
+                """UPDATE pois SET org = ?, role = ?, sensitivity = ?, active = 1
+                WHERE id = ?""",
+                (poi.get("org"), poi.get("role"), int(poi.get("sensitivity", 3)), poi_id),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO pois (name, org, role, sensitivity, active) VALUES (?, ?, ?, ?, 1)",
+                (poi["name"], poi.get("org"), poi.get("role"), int(poi.get("sensitivity", 3))),
+            )
+            poi_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        aliases = poi.get("aliases") or [poi["name"]]
+        for alias in aliases:
+            if not alias:
+                continue
+            conn.execute(
+                """INSERT INTO poi_aliases (poi_id, alias, alias_type, active)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(poi_id, alias) DO UPDATE SET active = 1""",
+                (poi_id, alias, "name"),
+            )
+    conn.commit()
+    conn.close()
+    print(f"Default POIs seeded from {seed_origin}.")
+
+
+def seed_default_protected_locations():
+    conn = get_connection()
+    watchlist = load_watchlist_yaml()
+    if watchlist and watchlist["protected_locations"]:
+        locations = watchlist["protected_locations"]
+        seed_origin = f"config ({watchlist['path']})"
+    else:
+        locations = []
+        seed_origin = "hardcoded defaults"
+
+    for location in locations:
+        existing = conn.execute(
+            "SELECT id FROM protected_locations WHERE name = ?",
+            (location["name"],),
+        ).fetchone()
+        payload = (
+            location.get("type"),
+            location.get("lat"),
+            location.get("lon"),
+            float(location.get("radius_miles", 5.0) or 5.0),
+            location.get("notes"),
+            location["name"],
+        )
+        if existing:
+            conn.execute(
+                """UPDATE protected_locations
+                SET type = ?, lat = ?, lon = ?, radius_miles = ?, notes = ?, active = 1
+                WHERE name = ?""",
+                payload,
+            )
+        else:
+            conn.execute(
+                """INSERT INTO protected_locations
+                (name, type, lat, lon, radius_miles, notes, active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)""",
+                (
+                    location["name"],
+                    location.get("type"),
+                    location.get("lat"),
+                    location.get("lon"),
+                    float(location.get("radius_miles", 5.0) or 5.0),
+                    location.get("notes"),
+                ),
+            )
+    conn.commit()
+    conn.close()
+    print(f"Protected locations seeded from {seed_origin}.")
+
+
+def seed_default_events():
+    conn = get_connection()
+    watchlist = load_watchlist_yaml()
+    if watchlist and watchlist["events"]:
+        events = watchlist["events"]
+        seed_origin = f"config ({watchlist['path']})"
+    else:
+        events = []
+        seed_origin = "hardcoded defaults"
+
+    for event in events:
+        poi_id = None
+        if event.get("poi_name"):
+            row = conn.execute("SELECT id FROM pois WHERE name = ?", (event["poi_name"],)).fetchone()
+            poi_id = row["id"] if row else None
+
+        existing = conn.execute(
+            "SELECT id FROM events WHERE name = ? AND start_dt = ?",
+            (event["name"], event["start_dt"]),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE events SET
+                    type = ?, end_dt = ?, city = ?, country = ?, venue = ?, lat = ?, lon = ?, poi_id = ?, notes = ?
+                   WHERE id = ?""",
+                (
+                    event.get("type"),
+                    event["end_dt"],
+                    event.get("city"),
+                    event.get("country"),
+                    event.get("venue"),
+                    event.get("lat"),
+                    event.get("lon"),
+                    poi_id,
+                    event.get("notes"),
+                    existing["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO events
+                (name, type, start_dt, end_dt, city, country, venue, lat, lon, poi_id, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event["name"],
+                    event.get("type"),
+                    event["start_dt"],
+                    event["end_dt"],
+                    event.get("city"),
+                    event.get("country"),
+                    event.get("venue"),
+                    event.get("lat"),
+                    event.get("lon"),
+                    poi_id,
+                    event.get("notes"),
+                ),
+            )
+    conn.commit()
+    conn.close()
+    print(f"Events seeded from {seed_origin}.")
 
 
 def seed_threat_actors():
@@ -415,10 +831,39 @@ def seed_threat_actors():
     print("Threat actors seeded.")
 
 
+def purge_raw_content(retention_days=None):
+    conn = get_connection()
+    try:
+        days_raw = retention_days if retention_days is not None else os.getenv(
+            "RAW_CONTENT_RETENTION_DAYS", "30"
+        )
+        days = max(1, int(days_raw))
+    except (TypeError, ValueError):
+        days = 30
+    cutoff = f"-{days} days"
+    result = conn.execute(
+        """UPDATE alerts
+        SET content = NULL
+        WHERE content IS NOT NULL
+          AND COALESCE(published_at, created_at) < datetime('now', ?)""",
+        (cutoff,),
+    )
+    conn.execute(
+        "INSERT INTO retention_log (action, rows_affected) VALUES (?, ?)",
+        (f"purge_raw_content_{days}d", int(result.rowcount or 0)),
+    )
+    conn.commit()
+    conn.close()
+    print(f"Purged raw content older than {days} days ({result.rowcount or 0} rows).")
+
+
 if __name__ == "__main__":
     init_db()
     migrate_schema()
     seed_default_sources()
     seed_default_keywords()
+    seed_default_pois()
+    seed_default_protected_locations()
+    seed_default_events()
     seed_threat_actors()
     print("Setup complete.")
