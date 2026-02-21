@@ -27,6 +27,7 @@ def migrate_schema():
     conn = get_connection()
     migrations = [
         "ALTER TABLE keywords ADD COLUMN weight REAL DEFAULT 1.0",
+        "ALTER TABLE keywords ADD COLUMN weight_sigma REAL",
         "ALTER TABLE sources ADD COLUMN credibility_score REAL DEFAULT 0.5",
         "ALTER TABLE sources ADD COLUMN true_positives INTEGER DEFAULT 0",
         "ALTER TABLE sources ADD COLUMN false_positives INTEGER DEFAULT 0",
@@ -38,6 +39,8 @@ def migrate_schema():
         "ALTER TABLE alerts ADD COLUMN published_at TIMESTAMP",
         "ALTER TABLE alert_scores ADD COLUMN z_score REAL DEFAULT 0.0",
         "ALTER TABLE threat_actors ADD COLUMN alert_count INTEGER DEFAULT 0",
+        "ALTER TABLE intelligence_reports ADD COLUMN top_entities TEXT",
+        "ALTER TABLE intelligence_reports ADD COLUMN new_cves TEXT",
     ]
     for sql in migrations:
         try:
@@ -52,6 +55,10 @@ def migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_alerts_created_date ON alerts(created_at)",
         "CREATE INDEX IF NOT EXISTS idx_alerts_published_date ON alerts(published_at)",
         "CREATE INDEX IF NOT EXISTS idx_keyword_frequency_kw_date ON keyword_frequency(keyword_id, date)",
+        "CREATE INDEX IF NOT EXISTS idx_entities_type_value ON entities(type, value)",
+        "CREATE INDEX IF NOT EXISTS idx_iocs_type_value ON iocs(type, value)",
+        "CREATE INDEX IF NOT EXISTS idx_alert_entities_alert ON alert_entities(alert_id)",
+        "CREATE INDEX IF NOT EXISTS idx_alert_iocs_alert ON alert_iocs(alert_id)",
     ]
     for sql in indexes:
         try:

@@ -234,8 +234,14 @@ def classify_alert(alert_id: int, body: ClassifyRequest):
 
 
 @app.get("/alerts/{alert_id}/score")
-def get_alert_score(alert_id: int):
+def get_alert_score(
+    alert_id: int,
+    uncertainty: int = Query(default=0, ge=0, le=1),
+    n: int = Query(default=500, ge=100, le=5000),
+):
     """Get the score breakdown for a specific alert."""
+    from analytics.risk_scoring import compute_uncertainty_for_alert
+
     conn = get_connection()
     score = conn.execute(
         """SELECT * FROM alert_scores WHERE alert_id = ?
@@ -246,7 +252,54 @@ def get_alert_score(alert_id: int):
         conn.close()
         raise HTTPException(status_code=404, detail="Score not found for alert")
     conn.close()
-    return dict(score)
+
+    payload = dict(score)
+    if uncertainty == 1:
+        try:
+            payload["uncertainty"] = compute_uncertainty_for_alert(alert_id=alert_id, n=n)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+    return payload
+
+
+@app.get("/alerts/{alert_id}/entities")
+def get_alert_entities(alert_id: int):
+    conn = get_connection()
+    alert = conn.execute("SELECT id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+    if not alert:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    entities = conn.execute(
+        """SELECT e.id, e.type, e.value, ae.confidence, ae.extractor, ae.context
+        FROM alert_entities ae
+        JOIN entities e ON e.id = ae.entity_id
+        WHERE ae.alert_id = ?
+        ORDER BY e.type, e.value""",
+        (alert_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(entity) for entity in entities]
+
+
+@app.get("/alerts/{alert_id}/iocs")
+def get_alert_iocs(alert_id: int):
+    conn = get_connection()
+    alert = conn.execute("SELECT id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+    if not alert:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    iocs = conn.execute(
+        """SELECT i.id, i.type, i.value, ai.extractor, ai.context
+        FROM alert_iocs ai
+        JOIN iocs i ON i.id = ai.ioc_id
+        WHERE ai.alert_id = ?
+        ORDER BY i.type, i.value""",
+        (alert_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(ioc) for ioc in iocs]
 
 
 @app.post("/alerts/rescore")
@@ -311,6 +364,8 @@ def get_report(report_date: str):
         "emerging_themes",
         "active_threat_actors",
         "escalation_recommendations",
+        "top_entities",
+        "new_cves",
     ):
         if result.get(field):
             result[field] = json.loads(result[field])
@@ -345,6 +400,14 @@ def get_keyword_trend_endpoint(keyword_id: int, days: int = Query(default=14, le
     from analytics.spike_detection import get_keyword_trend
 
     return get_keyword_trend(keyword_id, days=days)
+
+
+@app.get("/analytics/forecast/keyword/{keyword_id}")
+def get_keyword_forecast(keyword_id: int, horizon: int = Query(default=7, ge=1, le=30)):
+    """Forecast keyword frequency for the next N days."""
+    from analytics.forecasting import forecast_keyword
+
+    return forecast_keyword(keyword_id=keyword_id, horizon=horizon)
 
 
 @app.get("/analytics/evaluation")
@@ -421,6 +484,18 @@ def get_duplicate_stats():
         "dedup_ratio": round(duplicates / total, 4) if total > 0 else 0.0,
         "top_clusters": [dict(c) for c in clusters],
     }
+
+
+@app.get("/analytics/graph")
+def get_graph(
+    days: int = Query(default=7, ge=1, le=30),
+    min_score: float = Query(default=70.0, ge=0.0, le=100.0),
+    limit_alerts: int = Query(default=500, ge=10, le=2000),
+):
+    """Build a compact link-analysis graph across sources, keywords, entities, and IOCs."""
+    from analytics.graph import build_graph
+
+    return build_graph(days=days, min_score=min_score, limit_alerts=limit_alerts)
 
 
 # --- KEYWORDS ---

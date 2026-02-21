@@ -24,13 +24,25 @@ except requests.ConnectionError:
     st.error("Cannot connect to API. Make sure the API server is running on port 8000.")
     st.stop()
 
-# --- Tab layout (7 tabs) ---
-tab_overview, tab_intel, tab_alerts, tab_analytics, tab_scoring, tab_perf, tab_config = st.tabs(
+# --- Tab layout ---
+(
+    tab_overview,
+    tab_intel,
+    tab_alerts,
+    tab_analytics,
+    tab_forecast,
+    tab_graph,
+    tab_scoring,
+    tab_perf,
+    tab_config,
+) = st.tabs(
     [
         "📊 Overview",
         "📋 Intelligence Report",
         "🚨 Alert Feed",
         "📈 Analytics",
+        "🔮 Forecast",
+        "🕸️ Graph",
         "🧮 Scoring & Evaluation",
         "⚡ Performance",
         "⚙️ Configuration",
@@ -217,6 +229,29 @@ with tab_intel:
 
         st.divider()
 
+        st.markdown("### Top Entities (Last 24h)")
+        top_entities = report.get("top_entities", [])
+        if top_entities:
+            entity_df = pd.DataFrame(top_entities)
+            st.dataframe(
+                entity_df.rename(
+                    columns={"type": "Type", "value": "Entity", "mention_count": "Mentions"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No extracted entities for this period.")
+
+        st.markdown("### New CVEs (Last 24h)")
+        new_cves = report.get("new_cves", [])
+        if new_cves:
+            st.code("\n".join(new_cves), language="text")
+        else:
+            st.info("No CVEs extracted for this period.")
+
+        st.divider()
+
         # Emerging Themes
         themes = report.get("emerging_themes", [])
         st.markdown("### Emerging Themes (Frequency Spikes)")
@@ -313,7 +348,10 @@ with tab_alerts:
 
                     # Score breakdown
                     try:
-                        score_data = requests.get(f"{API_URL}/alerts/{alert['id']}/score").json()
+                        score_data = requests.get(
+                            f"{API_URL}/alerts/{alert['id']}/score",
+                            params={"uncertainty": 1, "n": 500},
+                        ).json()
                         if "keyword_weight" in score_data:
                             st.markdown("**Score Breakdown:**")
                             sc1, sc2, sc3, sc4, sc5 = st.columns(5)
@@ -324,6 +362,46 @@ with tab_alerts:
                             sc3.metric("Frequency Factor", f"{score_data['frequency_factor']:.1f}x")
                             sc4.metric("Z-Score", f"{score_data.get('z_score', 0):.2f}")
                             sc5.metric("Recency Factor", f"{score_data['recency_factor']:.2f}")
+                            uncertainty = score_data.get("uncertainty")
+                            if uncertainty:
+                                uc1, uc2, uc3, uc4 = st.columns(4)
+                                uc1.metric("P05", f"{uncertainty['p05']:.1f}")
+                                uc2.metric("P50", f"{uncertainty['p50']:.1f}")
+                                uc3.metric("P95", f"{uncertainty['p95']:.1f}")
+                                uc4.metric("Std Dev", f"{uncertainty['std']:.2f}")
+                    except Exception:
+                        pass
+
+                    # Extracted entities + IOCs
+                    try:
+                        entities = requests.get(f"{API_URL}/alerts/{alert['id']}/entities").json()
+                        iocs = requests.get(f"{API_URL}/alerts/{alert['id']}/iocs").json()
+                        if entities:
+                            st.markdown("**Entities:**")
+                            st.dataframe(
+                                pd.DataFrame(entities)[["type", "value", "extractor"]].rename(
+                                    columns={
+                                        "type": "Type",
+                                        "value": "Value",
+                                        "extractor": "Extractor",
+                                    }
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        if iocs:
+                            st.markdown("**IOCs:**")
+                            st.dataframe(
+                                pd.DataFrame(iocs)[["type", "value", "extractor"]].rename(
+                                    columns={
+                                        "type": "Type",
+                                        "value": "Value",
+                                        "extractor": "Extractor",
+                                    }
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
                     except Exception:
                         pass
 
@@ -467,7 +545,114 @@ with tab_analytics:
 
 
 # ============================================================
-# TAB 5: SCORING & EVALUATION
+# TAB 5: FORECAST
+# ============================================================
+with tab_forecast:
+    st.subheader("Keyword Frequency Forecast")
+    try:
+        keywords = requests.get(f"{API_URL}/keywords").json()
+        if keywords:
+            kw_options = {k["term"]: k["id"] for k in keywords}
+            selected_term = st.selectbox("Keyword", list(kw_options.keys()), key="forecast_keyword")
+            horizon = st.slider("Horizon (days)", min_value=1, max_value=14, value=7)
+            forecast_payload = requests.get(
+                f"{API_URL}/analytics/forecast/keyword/{kw_options[selected_term]}",
+                params={"horizon": horizon},
+            ).json()
+            forecast = forecast_payload.get("forecast", [])
+            history = forecast_payload.get("history", [])
+            quality = forecast_payload.get("quality", {})
+            if forecast:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Method", forecast[0].get("method", "unknown"))
+                c2.metric(
+                    "SMAPE",
+                    f"{quality.get('smape', 0):.2f}" if quality.get("smape") is not None else "N/A",
+                )
+                c3.metric("Train Days", quality.get("n_train_days", 0))
+
+                hist_df = pd.DataFrame(history)
+                hist_df["series"] = "history"
+                fcst_df = pd.DataFrame(forecast).rename(columns={"yhat": "count"})
+                fcst_df["series"] = "forecast"
+                chart_df = pd.concat(
+                    [
+                        hist_df[["date", "count", "series"]],
+                        fcst_df[["date", "count", "series"]],
+                    ],
+                    ignore_index=True,
+                )
+                fig = px.line(chart_df, x="date", y="count", color="series", markers=True)
+                fig.add_trace(
+                    go.Scatter(
+                        x=fcst_df["date"],
+                        y=fcst_df["lo"],
+                        mode="lines",
+                        line={"width": 1, "dash": "dash", "color": "#94a3b8"},
+                        name="Forecast Lo",
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=fcst_df["date"],
+                        y=fcst_df["hi"],
+                        mode="lines",
+                        line={"width": 1, "dash": "dash", "color": "#94a3b8"},
+                        name="Forecast Hi",
+                    )
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(fcst_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No keywords found.")
+    except Exception as e:
+        st.error(f"Forecast error: {e}")
+
+
+# ============================================================
+# TAB 6: GRAPH
+# ============================================================
+with tab_graph:
+    st.subheader("Link Analysis Graph")
+    days = st.slider("Days", min_value=1, max_value=30, value=7)
+    min_score = st.slider("Minimum score", min_value=0.0, max_value=100.0, value=70.0, step=1.0)
+    limit_alerts = st.slider("Alert limit", min_value=50, max_value=1000, value=500, step=50)
+    try:
+        graph_data = requests.get(
+            f"{API_URL}/analytics/graph",
+            params={"days": days, "min_score": min_score, "limit_alerts": limit_alerts},
+        ).json()
+        nodes = graph_data.get("nodes", [])
+        edges = graph_data.get("edges", [])
+        c1, c2 = st.columns(2)
+        c1.metric("Nodes", len(nodes))
+        c2.metric("Edges", len(edges))
+        if edges:
+            edge_df = pd.DataFrame(edges).head(100)
+            st.markdown("### Top Edges")
+            st.dataframe(edge_df, use_container_width=True, hide_index=True)
+
+            degree = {}
+            for edge in edges:
+                degree[edge["source"]] = degree.get(edge["source"], 0) + edge["weight"]
+                degree[edge["target"]] = degree.get(edge["target"], 0) + edge["weight"]
+            degree_df = (
+                pd.DataFrame(
+                    [{"node": node, "weighted_degree": weight} for node, weight in degree.items()]
+                )
+                .sort_values("weighted_degree", ascending=False)
+                .head(50)
+            )
+            st.markdown("### Degree Centrality (Weighted)")
+            st.dataframe(degree_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Graph is empty for current filters.")
+    except Exception as e:
+        st.error(f"Graph error: {e}")
+
+
+# ============================================================
+# TAB 7: SCORING & EVALUATION
 # ============================================================
 with tab_scoring:
     st.subheader("Scoring Model & Evaluation Metrics")
@@ -681,7 +866,7 @@ with tab_scoring:
 
 
 # ============================================================
-# TAB 6: PERFORMANCE
+# TAB 8: PERFORMANCE
 # ============================================================
 with tab_perf:
     st.subheader("Scraping Performance & Deduplication")
@@ -781,7 +966,7 @@ with tab_perf:
 
 
 # ============================================================
-# TAB 7: CONFIGURATION
+# TAB 9: CONFIGURATION
 # ============================================================
 with tab_config:
     st.subheader("Configuration")

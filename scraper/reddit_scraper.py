@@ -1,6 +1,7 @@
 import feedparser
 
 from analytics.dedup import check_duplicate
+from analytics.extraction import extract_and_store_alert_artifacts
 from analytics.risk_scoring import (
     build_frequency_snapshot,
     increment_keyword_frequency,
@@ -91,6 +92,9 @@ def run_reddit_scraper(frequency_snapshot=None):
                             published_at=entry["published"],
                             frequency_override=score_args[0] if score_args else None,
                             z_score_override=score_args[1] if score_args else None,
+                        )
+                        extract_and_store_alert_artifacts(
+                            conn, alert_id, f"{entry['title']}\n{entry['content']}"
                         )
                         increment_keyword_frequency(conn, keyword["id"])
                         new_alerts += 1
