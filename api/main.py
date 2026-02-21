@@ -2,6 +2,7 @@ import json
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 import sys
 import os
 
@@ -248,6 +249,14 @@ def trigger_rescore():
 def get_daily_report(date: Optional[str] = None):
     """Generate or retrieve the intelligence report for a given date."""
     from analytics.intelligence_report import generate_daily_report
+    if date is not None:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid date format. Use YYYY-MM-DD.",
+            ) from e
     report = generate_daily_report(report_date=date)
     return report
 
@@ -287,10 +296,21 @@ def get_report(report_date: str):
 # --- ANALYTICS ---
 
 @app.get("/analytics/spikes")
-def get_spikes(threshold: float = Query(default=2.0, ge=1.0)):
+def get_spikes(
+    threshold: float = Query(default=2.0, ge=1.0),
+    date: Optional[str] = Query(default=None),
+):
     """Get keywords with unusual frequency spikes (includes Z-score)."""
     from analytics.spike_detection import detect_spikes
-    return detect_spikes(threshold=threshold)
+    if date is not None:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid date format. Use YYYY-MM-DD.",
+            ) from e
+    return detect_spikes(threshold=threshold, as_of_date=date)
 
 
 @app.get("/analytics/keyword-trend/{keyword_id}")
@@ -308,6 +328,14 @@ def get_evaluation_metrics(source_id: Optional[int] = None):
     """
     from analytics.risk_scoring import compute_evaluation_metrics
     conn = get_connection()
+    if source_id is not None:
+        source = conn.execute(
+            "SELECT id FROM sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+        if not source:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Source not found")
     results = compute_evaluation_metrics(conn, source_id=source_id)
     conn.close()
     return results

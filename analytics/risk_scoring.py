@@ -247,12 +247,14 @@ def compute_evaluation_metrics(conn, source_id=None):
     Precision = TP / (TP + FP)
     Recall = TP / (TP + FN) where FN ~ reviewed but unclassified
     """
-    if source_id:
-        sources = [conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()]
+    if source_id is not None:
+        source = conn.execute(
+            "SELECT * FROM sources WHERE id = ?", (source_id,)
+        ).fetchone()
+        sources = [source] if source else []
     else:
         sources = conn.execute("SELECT * FROM sources").fetchall()
 
-    today = datetime.utcnow().strftime("%Y-%m-%d")
     results = []
     for src in sources:
         tp = src["true_positives"] or 0
@@ -283,12 +285,4 @@ def compute_evaluation_metrics(conn, source_id=None):
             "static_credibility": src["credibility_score"] or 0.5,
         })
 
-        conn.execute(
-            """INSERT INTO evaluation_metrics
-            (source_id, period, true_positives, false_positives, total_reviewed, precision, recall, f1_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (src["id"], today, tp, fp, reviewed_count, precision, recall, f1),
-        )
-
-    conn.commit()
     return results

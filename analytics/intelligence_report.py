@@ -56,7 +56,7 @@ def generate_daily_report(report_date=None):
     total = sum(severity_map.values())
 
     # --- Emerging themes (spiking keywords) ---
-    spikes = detect_spikes(threshold=1.5)
+    spikes = detect_spikes(threshold=1.5, as_of_date=report_date)
 
     # --- Most mentioned keywords (unique alerts only) ---
     top_keywords = conn.execute(
