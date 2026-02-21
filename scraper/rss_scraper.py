@@ -1,9 +1,40 @@
-import feedparser
 import re
-from datetime import datetime
-from database.init_db import get_connection
-from analytics.risk_scoring import increment_keyword_frequency, score_alert
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+
+import feedparser
+
 from analytics.dedup import check_duplicate
+from analytics.risk_scoring import (
+    build_frequency_snapshot,
+    increment_keyword_frequency,
+    score_alert,
+)
+from database.init_db import get_connection
+
+
+def parse_entry_published_at(entry):
+    """
+    Parse an RSS/Atom entry published timestamp to UTC naive string.
+    Returns '%Y-%m-%d %H:%M:%S' or None.
+    """
+    published_text = entry.get("published") or entry.get("updated")
+    if published_text:
+        try:
+            published_dt = parsedate_to_datetime(published_text)
+            if published_dt.tzinfo is not None:
+                published_dt = published_dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return published_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            pass
+
+    published_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if published_parsed:
+        try:
+            return datetime(*published_parsed[:6]).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def fetch_rss_feed(url):
@@ -15,7 +46,7 @@ def fetch_rss_feed(url):
                 "title": entry.get("title", ""),
                 "content": entry.get("summary", entry.get("description", "")),
                 "url": entry.get("link", ""),
-                "published": entry.get("published", str(datetime.utcnow())),
+                "published": parse_entry_published_at(entry),
             }
         )
     return entries
@@ -23,9 +54,20 @@ def fetch_rss_feed(url):
 
 def match_keywords(text, keywords):
     matches = []
+    text = text or ""
     text_lower = text.lower()
     for keyword in keywords:
-        if re.search(r"\b" + re.escape(keyword["term"].lower()) + r"\b", text_lower):
+        term = (keyword.get("term") or "").strip()
+        if not term:
+            continue
+
+        # Avoid false positives for natural-language "apt" (e.g., "apt response").
+        if term.lower() == "apt":
+            if re.search(r"\bapt\s?\d{2,4}\b", text, flags=re.IGNORECASE):
+                matches.append(keyword)
+            continue
+
+        if re.search(r"\b" + re.escape(term.lower()) + r"\b", text_lower):
             matches.append(keyword)
     return matches
 
@@ -51,9 +93,13 @@ def alert_exists(conn, source_id, keyword_id, url):
     return cursor.fetchone() is not None
 
 
-def run_rss_scraper():
+def run_rss_scraper(frequency_snapshot=None):
     conn = get_connection()
     keywords = get_active_keywords(conn)
+    if frequency_snapshot is None:
+        frequency_snapshot = build_frequency_snapshot(
+            conn, keyword_ids=[keyword["id"] for keyword in keywords]
+        )
     sources = get_active_sources(conn, "rss")
     new_alerts = 0
     duplicates = 0
@@ -74,8 +120,8 @@ def run_rss_scraper():
                     conn.execute(
                         """INSERT INTO alerts
                            (source_id, keyword_id, title, content, url, matched_term,
-                            content_hash, duplicate_of, severity)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            content_hash, duplicate_of, published_at, severity)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             source["id"],
                             keyword["id"],
@@ -85,17 +131,24 @@ def run_rss_scraper():
                             keyword["term"],
                             content_hash,
                             duplicate_of,
+                            entry["published"],
                             "low",
                         ),
                     )
                     alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
                     if duplicate_of is None:
-                        # Only score and count unique alerts
-                        increment_keyword_frequency(conn, keyword["id"])
+                        score_args = frequency_snapshot.get(keyword["id"])
                         score_alert(
-                            conn, alert_id, keyword["id"], source["id"]
+                            conn,
+                            alert_id,
+                            keyword["id"],
+                            source["id"],
+                            published_at=entry["published"],
+                            frequency_override=score_args[0] if score_args else None,
+                            z_score_override=score_args[1] if score_args else None,
                         )
+                        increment_keyword_frequency(conn, keyword["id"])
                         new_alerts += 1
                     else:
                         duplicates += 1

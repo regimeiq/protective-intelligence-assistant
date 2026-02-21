@@ -1,15 +1,20 @@
 import json
+import os
+import sys
+from datetime import datetime
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime
-import sys
-import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from database.init_db import (
-    get_connection, init_db, migrate_schema,
-    seed_default_sources, seed_default_keywords, seed_threat_actors,
+    get_connection,
+    init_db,
+    migrate_schema,
+    seed_default_keywords,
+    seed_default_sources,
+    seed_threat_actors,
 )
 
 app = FastAPI(
@@ -20,6 +25,7 @@ app = FastAPI(
 
 
 # --- Models ---
+
 
 class KeywordCreate(BaseModel):
     term: str
@@ -39,6 +45,7 @@ class AlertResponse(BaseModel):
     risk_score: Optional[float] = None
     severity: str
     reviewed: int
+    published_at: Optional[str] = None
     created_at: str
     source_name: Optional[str] = None
     matched_term: Optional[str] = None
@@ -46,13 +53,24 @@ class AlertResponse(BaseModel):
 
 # --- Startup ---
 
+
 @app.on_event("startup")
 def startup():
     init_db()
     migrate_schema()
-    seed_default_sources()
-    seed_default_keywords()
-    seed_threat_actors()
+    conn = get_connection()
+    source_count = conn.execute("SELECT COUNT(*) AS count FROM sources").fetchone()["count"]
+    keyword_count = conn.execute("SELECT COUNT(*) AS count FROM keywords").fetchone()["count"]
+    actor_count = conn.execute("SELECT COUNT(*) AS count FROM threat_actors").fetchone()["count"]
+    conn.close()
+
+    # Seed only on first-run empty tables; do not overwrite analyst-tuned values.
+    if source_count == 0:
+        seed_default_sources()
+    if keyword_count == 0:
+        seed_default_keywords()
+    if actor_count == 0:
+        seed_threat_actors()
 
 
 @app.get("/")
@@ -62,19 +80,20 @@ def root():
 
 # --- ALERTS ---
 
+
 @app.get("/alerts")
 def get_alerts(
     severity: Optional[str] = None,
     reviewed: Optional[int] = None,
     min_score: Optional[float] = None,
-    sort_by: str = Query(default="risk_score", pattern="^(risk_score|created_at)$"),
+    sort_by: str = Query(default="risk_score", pattern="^(risk_score|created_at|published_at)$"),
     limit: int = Query(default=50, le=500),
     offset: int = 0,
 ):
     conn = get_connection()
     query = """
         SELECT a.id, a.title, a.content, a.url, a.risk_score, a.severity,
-               a.reviewed, a.created_at, a.content_hash, a.duplicate_of,
+               a.reviewed, a.published_at, a.created_at, a.content_hash, a.duplicate_of,
                s.name as source_name, k.term as matched_term
         FROM alerts a
         LEFT JOIN sources s ON a.source_id = s.id
@@ -133,6 +152,7 @@ def get_alerts_summary():
 
     # Count active spikes
     from analytics.spike_detection import detect_spikes
+
     active_spikes = len(detect_spikes(threshold=2.0))
 
     # Duplicate stats
@@ -155,9 +175,7 @@ def get_alerts_summary():
 @app.patch("/alerts/{alert_id}/review")
 def mark_reviewed(alert_id: int):
     conn = get_connection()
-    result = conn.execute(
-        "UPDATE alerts SET reviewed = 1 WHERE id = ?", (alert_id,)
-    )
+    result = conn.execute("UPDATE alerts SET reviewed = 1 WHERE id = ?", (alert_id,))
     if result.rowcount == 0:
         conn.close()
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -181,9 +199,7 @@ def classify_alert(alert_id: int, body: ClassifyRequest):
         )
 
     conn = get_connection()
-    alert = conn.execute(
-        "SELECT source_id FROM alerts WHERE id = ?", (alert_id,)
-    ).fetchone()
+    alert = conn.execute("SELECT source_id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
     if not alert:
         conn.close()
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -237,6 +253,7 @@ def get_alert_score(alert_id: int):
 def trigger_rescore():
     """Re-score all unreviewed alerts with current weights and frequencies."""
     from analytics.risk_scoring import rescore_all_alerts
+
     conn = get_connection()
     count = rescore_all_alerts(conn)
     conn.close()
@@ -245,10 +262,12 @@ def trigger_rescore():
 
 # --- INTELLIGENCE REPORTS ---
 
+
 @app.get("/intelligence/daily")
 def get_daily_report(date: Optional[str] = None):
     """Generate or retrieve the intelligence report for a given date."""
     from analytics.intelligence_report import generate_daily_report
+
     if date is not None:
         try:
             datetime.strptime(date, "%Y-%m-%d")
@@ -287,13 +306,19 @@ def get_report(report_date: str):
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
     result = dict(report)
-    for field in ("top_risks", "emerging_themes", "active_threat_actors", "escalation_recommendations"):
+    for field in (
+        "top_risks",
+        "emerging_themes",
+        "active_threat_actors",
+        "escalation_recommendations",
+    ):
         if result.get(field):
             result[field] = json.loads(result[field])
     return result
 
 
 # --- ANALYTICS ---
+
 
 @app.get("/analytics/spikes")
 def get_spikes(
@@ -302,6 +327,7 @@ def get_spikes(
 ):
     """Get keywords with unusual frequency spikes (includes Z-score)."""
     from analytics.spike_detection import detect_spikes
+
     if date is not None:
         try:
             datetime.strptime(date, "%Y-%m-%d")
@@ -317,6 +343,7 @@ def get_spikes(
 def get_keyword_trend_endpoint(keyword_id: int, days: int = Query(default=14, le=60)):
     """Get daily frequency trend for a specific keyword."""
     from analytics.spike_detection import get_keyword_trend
+
     return get_keyword_trend(keyword_id, days=days)
 
 
@@ -327,6 +354,7 @@ def get_evaluation_metrics(source_id: Optional[int] = None):
     Based on TP/FP classifications from alert reviews.
     """
     from analytics.risk_scoring import compute_evaluation_metrics
+
     conn = get_connection()
     if source_id is not None:
         source = conn.execute(
@@ -361,6 +389,7 @@ def run_backtest():
     Compares multi-factor scoring vs naive baseline.
     """
     from analytics.backtesting import run_backtest
+
     return run_backtest()
 
 
@@ -396,6 +425,7 @@ def get_duplicate_stats():
 
 # --- KEYWORDS ---
 
+
 @app.get("/keywords")
 def get_keywords():
     conn = get_connection()
@@ -416,9 +446,7 @@ def add_keyword(keyword: KeywordCreate):
     except Exception:
         conn.close()
         raise HTTPException(status_code=409, detail="Keyword already exists")
-    new_keyword = conn.execute(
-        "SELECT * FROM keywords WHERE term = ?", (keyword.term,)
-    ).fetchone()
+    new_keyword = conn.execute("SELECT * FROM keywords WHERE term = ?", (keyword.term,)).fetchone()
     conn.close()
     return dict(new_keyword)
 
@@ -453,6 +481,7 @@ def update_keyword_weight(keyword_id: int, weight: float = Query(ge=0.1, le=5.0)
 
 # --- SOURCES ---
 
+
 @app.get("/sources")
 def get_sources():
     conn = get_connection()
@@ -479,11 +508,10 @@ def update_source_credibility(source_id: int, credibility_score: float = Query(g
 
 # --- THREAT ACTORS ---
 
+
 @app.get("/threat-actors")
 def get_threat_actors():
     conn = get_connection()
-    actors = conn.execute(
-        "SELECT * FROM threat_actors ORDER BY name"
-    ).fetchall()
+    actors = conn.execute("SELECT * FROM threat_actors ORDER BY name").fetchall()
     conn.close()
     return [dict(a) for a in actors]

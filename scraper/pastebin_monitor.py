@@ -1,10 +1,14 @@
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
-from database.init_db import get_connection
-from scraper.rss_scraper import match_keywords, get_active_keywords, alert_exists
-from analytics.risk_scoring import increment_keyword_frequency, score_alert
+
 from analytics.dedup import check_duplicate
+from analytics.risk_scoring import (
+    build_frequency_snapshot,
+    increment_keyword_frequency,
+    score_alert,
+)
+from database.init_db import get_connection
+from scraper.rss_scraper import alert_exists, get_active_keywords, match_keywords
 
 PASTEBIN_ARCHIVE_URL = "https://pastebin.com/archive"
 
@@ -13,9 +17,7 @@ def fetch_recent_pastes():
     """Scrape pastebin archive page for recent public pastes."""
     entries = []
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(PASTEBIN_ARCHIVE_URL, headers=headers, timeout=10)
         response.raise_for_status()
 
@@ -50,9 +52,7 @@ def fetch_paste_content(url):
     """Fetch raw content of a specific paste."""
     try:
         raw_url = url.replace("pastebin.com/", "pastebin.com/raw/")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(raw_url, headers=headers, timeout=10)
         response.raise_for_status()
         return response.text[:5000]
@@ -63,9 +63,7 @@ def fetch_paste_content(url):
 
 def ensure_pastebin_source(conn):
     """Make sure pastebin exists as a source in the DB."""
-    cursor = conn.execute(
-        "SELECT id FROM sources WHERE name = 'Pastebin Archive'"
-    )
+    cursor = conn.execute("SELECT id FROM sources WHERE name = 'Pastebin Archive'")
     row = cursor.fetchone()
     if row:
         return row["id"]
@@ -75,15 +73,17 @@ def ensure_pastebin_source(conn):
         ("Pastebin Archive", PASTEBIN_ARCHIVE_URL, "pastebin", 0.2),
     )
     conn.commit()
-    cursor = conn.execute(
-        "SELECT id FROM sources WHERE name = 'Pastebin Archive'"
-    )
+    cursor = conn.execute("SELECT id FROM sources WHERE name = 'Pastebin Archive'")
     return cursor.fetchone()["id"]
 
 
-def run_pastebin_scraper():
+def run_pastebin_scraper(frequency_snapshot=None):
     conn = get_connection()
     keywords = get_active_keywords(conn)
+    if frequency_snapshot is None:
+        frequency_snapshot = build_frequency_snapshot(
+            conn, keyword_ids=[keyword["id"] for keyword in keywords]
+        )
     source_id = ensure_pastebin_source(conn)
     new_alerts = 0
     duplicates = 0
@@ -101,14 +101,12 @@ def run_pastebin_scraper():
 
         for keyword in matches:
             if not alert_exists(conn, source_id, keyword["id"], paste["url"]):
-                content_hash, duplicate_of = check_duplicate(
-                    conn, paste["title"], content
-                )
+                content_hash, duplicate_of = check_duplicate(conn, paste["title"], content)
                 conn.execute(
                     """INSERT INTO alerts
                        (source_id, keyword_id, title, content, url, matched_term,
-                        content_hash, duplicate_of, severity)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        content_hash, duplicate_of, published_at, severity)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         source_id,
                         keyword["id"],
@@ -118,14 +116,23 @@ def run_pastebin_scraper():
                         keyword["term"],
                         content_hash,
                         duplicate_of,
+                        None,
                         "low",
                     ),
                 )
                 alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
                 if duplicate_of is None:
+                    score_args = frequency_snapshot.get(keyword["id"])
+                    score_alert(
+                        conn,
+                        alert_id,
+                        keyword["id"],
+                        source_id,
+                        frequency_override=score_args[0] if score_args else None,
+                        z_score_override=score_args[1] if score_args else None,
+                    )
                     increment_keyword_frequency(conn, keyword["id"])
-                    score_alert(conn, alert_id, keyword["id"], source_id)
                     new_alerts += 1
                 else:
                     duplicates += 1

@@ -20,9 +20,9 @@ GOLDEN_DATASET = [
         "keyword": "supply chain attack",
         "keyword_weight": 4.0,
         "expected_severity": "critical",
-        "source_credibility": 1.0,   # CISA reported
-        "frequency_factor": 3.5,      # Massive spike
-        "recency_hours": 2.0,         # Very recent
+        "source_credibility": 1.0,  # CISA reported
+        "frequency_factor": 3.5,  # Massive spike
+        "recency_hours": 2.0,  # Very recent
         "description": "Nation-state supply chain compromise of SolarWinds Orion",
     },
     {
@@ -31,7 +31,7 @@ GOLDEN_DATASET = [
         "keyword_weight": 4.5,
         "expected_severity": "critical",
         "source_credibility": 1.0,
-        "frequency_factor": 4.0,      # Extreme spike
+        "frequency_factor": 4.0,  # Extreme spike
         "recency_hours": 1.0,
         "description": "Critical RCE in Apache Log4j affecting millions of systems",
     },
@@ -137,19 +137,21 @@ def run_backtest():
         baseline_total_score += baseline_score
         full_total_score += full_score
 
-        results.append({
-            "incident": incident["name"],
-            "keyword": incident["keyword"],
-            "expected_severity": expected,
-            "baseline_score": baseline_score,
-            "baseline_severity": baseline_severity,
-            "baseline_correct": baseline_match,
-            "full_score": full_score,
-            "full_severity": full_severity,
-            "full_correct": full_match,
-            "score_improvement": round(full_score - baseline_score, 1),
-            "description": incident["description"],
-        })
+        results.append(
+            {
+                "incident": incident["name"],
+                "keyword": incident["keyword"],
+                "expected_severity": expected,
+                "baseline_score": baseline_score,
+                "baseline_severity": baseline_severity,
+                "baseline_correct": baseline_match,
+                "full_score": full_score,
+                "full_severity": full_severity,
+                "full_correct": full_match,
+                "score_improvement": round(full_score - baseline_score, 1),
+                "description": incident["description"],
+            }
+        )
 
     n = len(GOLDEN_DATASET)
     return {

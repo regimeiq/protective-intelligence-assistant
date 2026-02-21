@@ -1,10 +1,11 @@
-import streamlit as st
-import requests
+import os
+from datetime import date, datetime
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import os
-from datetime import datetime, date
+import requests
+import streamlit as st
 
 API_URL = os.getenv("OSINT_API_URL", "http://localhost:8000").rstrip("/")
 
@@ -24,15 +25,17 @@ except requests.ConnectionError:
     st.stop()
 
 # --- Tab layout (7 tabs) ---
-tab_overview, tab_intel, tab_alerts, tab_analytics, tab_scoring, tab_perf, tab_config = st.tabs([
-    "📊 Overview",
-    "📋 Intelligence Report",
-    "🚨 Alert Feed",
-    "📈 Analytics",
-    "🧮 Scoring & Evaluation",
-    "⚡ Performance",
-    "⚙️ Configuration",
-])
+tab_overview, tab_intel, tab_alerts, tab_analytics, tab_scoring, tab_perf, tab_config = st.tabs(
+    [
+        "📊 Overview",
+        "📋 Intelligence Report",
+        "🚨 Alert Feed",
+        "📈 Analytics",
+        "🧮 Scoring & Evaluation",
+        "⚡ Performance",
+        "⚙️ Configuration",
+    ]
+)
 
 SEVERITY_COLORS = {
     "critical": "#dc2626",
@@ -65,7 +68,8 @@ with tab_overview:
         col8.metric("Duplicates Detected", summary.get("duplicates", 0))
         dedup_pct = (
             round(summary.get("duplicates", 0) / summary["total_alerts"] * 100, 1)
-            if summary["total_alerts"] > 0 else 0
+            if summary["total_alerts"] > 0
+            else 0
         )
         col9.metric("Dedup Rate", f"{dedup_pct}%")
 
@@ -86,8 +90,11 @@ with tab_overview:
                 )
                 severity_df = severity_df.sort_values("Severity")
                 fig_sev = px.bar(
-                    severity_df, x="Severity", y="Count",
-                    color="Severity", color_discrete_map=SEVERITY_COLORS,
+                    severity_df,
+                    x="Severity",
+                    y="Count",
+                    color="Severity",
+                    color_discrete_map=SEVERITY_COLORS,
                 )
                 fig_sev.update_layout(showlegend=False, height=350)
                 st.plotly_chart(fig_sev, use_container_width=True)
@@ -115,19 +122,20 @@ with tab_overview:
 
         # Risk score distribution
         st.subheader("Risk Score Distribution")
-        alerts_for_dist = requests.get(
-            f"{API_URL}/alerts", params={"limit": 500}
-        ).json()
+        alerts_for_dist = requests.get(f"{API_URL}/alerts", params={"limit": 500}).json()
         if alerts_for_dist:
             scores = [a["risk_score"] for a in alerts_for_dist if a.get("risk_score")]
             if scores:
                 fig_hist = px.histogram(
-                    x=scores, nbins=20,
+                    x=scores,
+                    nbins=20,
                     labels={"x": "Risk Score", "y": "Count"},
                     color_discrete_sequence=["#f97316"],
                 )
                 fig_hist.update_layout(
-                    xaxis_title="Risk Score", yaxis_title="Alert Count", height=300,
+                    xaxis_title="Risk Score",
+                    yaxis_title="Alert Count",
+                    height=300,
                 )
                 st.plotly_chart(fig_hist, use_container_width=True)
 
@@ -185,14 +193,22 @@ with tab_intel:
         st.markdown("### Top Risks")
         if top_risks:
             risk_df = pd.DataFrame(top_risks)
-            display_cols = [c for c in ["title", "risk_score", "severity", "source_name", "keyword"] if c in risk_df.columns]
+            display_cols = [
+                c
+                for c in ["title", "risk_score", "severity", "source_name", "keyword"]
+                if c in risk_df.columns
+            ]
             if display_cols:
                 st.dataframe(
-                    risk_df[display_cols].rename(columns={
-                        "title": "Title", "risk_score": "Risk Score",
-                        "severity": "Severity", "source_name": "Source",
-                        "keyword": "Keyword",
-                    }),
+                    risk_df[display_cols].rename(
+                        columns={
+                            "title": "Title",
+                            "risk_score": "Risk Score",
+                            "severity": "Severity",
+                            "source_name": "Source",
+                            "keyword": "Keyword",
+                        }
+                    ),
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -207,14 +223,19 @@ with tab_intel:
         if themes:
             themes_df = pd.DataFrame(themes)
             fig_themes = px.bar(
-                themes_df, x="term", y="spike_ratio",
-                color="spike_ratio", color_continuous_scale="OrRd",
+                themes_df,
+                x="term",
+                y="spike_ratio",
+                color="spike_ratio",
+                color_continuous_scale="OrRd",
                 labels={"term": "Keyword", "spike_ratio": "Spike Ratio (vs 7d avg)"},
             )
             fig_themes.update_layout(height=350)
             st.plotly_chart(fig_themes, use_container_width=True)
         else:
-            st.info("No keyword spikes detected. Spike detection requires 3+ days of scraping data.")
+            st.info(
+                "No keyword spikes detected. Spike detection requires 3+ days of scraping data."
+            )
 
         # Active Threat Actors
         actors = report.get("active_threat_actors", [])
@@ -247,9 +268,7 @@ with tab_alerts:
             "Filter by Severity", ["All", "critical", "high", "medium", "low"]
         )
     with filter_col2:
-        review_filter = st.selectbox(
-            "Filter by Status", ["All", "Unreviewed", "Reviewed"]
-        )
+        review_filter = st.selectbox("Filter by Status", ["All", "Unreviewed", "Reviewed"])
     with filter_col3:
         min_score = st.slider("Minimum Risk Score", 0.0, 100.0, 0.0, 5.0)
 
@@ -277,11 +296,12 @@ with tab_alerts:
                 with st.expander(
                     f"{icon} {reviewed_tag} [{severity.upper()} {score:.0f}]{dup_tag} {alert['title'][:100]}"
                 ):
-                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
                     mc1.write(f"**Risk Score:** {score:.1f}")
                     mc2.write(f"**Source:** {alert.get('source_name', 'Unknown')}")
                     mc3.write(f"**Keyword:** {alert.get('matched_term', 'N/A')}")
-                    mc4.write(f"**Time:** {alert['created_at']}")
+                    mc4.write(f"**Published:** {alert.get('published_at') or 'Unknown'}")
+                    mc5.write(f"**Ingested:** {alert['created_at']}")
 
                     if alert.get("duplicate_of"):
                         st.caption(f"Duplicate of alert #{alert['duplicate_of']}")
@@ -293,14 +313,14 @@ with tab_alerts:
 
                     # Score breakdown
                     try:
-                        score_data = requests.get(
-                            f"{API_URL}/alerts/{alert['id']}/score"
-                        ).json()
+                        score_data = requests.get(f"{API_URL}/alerts/{alert['id']}/score").json()
                         if "keyword_weight" in score_data:
                             st.markdown("**Score Breakdown:**")
                             sc1, sc2, sc3, sc4, sc5 = st.columns(5)
                             sc1.metric("Keyword Weight", f"{score_data['keyword_weight']:.1f}")
-                            sc2.metric("Source Credibility", f"{score_data['source_credibility']:.2f}")
+                            sc2.metric(
+                                "Source Credibility", f"{score_data['source_credibility']:.2f}"
+                            )
                             sc3.metric("Frequency Factor", f"{score_data['frequency_factor']:.1f}x")
                             sc4.metric("Z-Score", f"{score_data.get('z_score', 0):.2f}")
                             sc5.metric("Recency Factor", f"{score_data['recency_factor']:.2f}")
@@ -348,25 +368,45 @@ with tab_analytics:
         if spikes:
             spike_df = pd.DataFrame(spikes)
             fig_spike = px.bar(
-                spike_df, x="term", y="spike_ratio",
-                color="today_count", color_continuous_scale="Reds",
-                labels={"term": "Keyword", "spike_ratio": "Spike Ratio", "today_count": "Today's Count"},
+                spike_df,
+                x="term",
+                y="spike_ratio",
+                color="today_count",
+                color_continuous_scale="Reds",
+                labels={
+                    "term": "Keyword",
+                    "spike_ratio": "Spike Ratio",
+                    "today_count": "Today's Count",
+                },
                 title="Active Keyword Spikes (vs 7-day average)",
             )
             fig_spike.update_layout(height=400)
             st.plotly_chart(fig_spike, use_container_width=True)
 
             # Show z-score column in table
-            display_cols = [c for c in ["term", "category", "today_count", "avg_7d", "spike_ratio", "z_score"] if c in spike_df.columns]
+            display_cols = [
+                c
+                for c in ["term", "category", "today_count", "avg_7d", "spike_ratio", "z_score"]
+                if c in spike_df.columns
+            ]
             st.dataframe(
-                spike_df[display_cols].rename(columns={
-                    "term": "Keyword", "category": "Category", "today_count": "Today",
-                    "avg_7d": "7d Avg", "spike_ratio": "Spike Ratio", "z_score": "Z-Score",
-                }),
-                use_container_width=True, hide_index=True,
+                spike_df[display_cols].rename(
+                    columns={
+                        "term": "Keyword",
+                        "category": "Category",
+                        "today_count": "Today",
+                        "avg_7d": "7d Avg",
+                        "spike_ratio": "Spike Ratio",
+                        "z_score": "Z-Score",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
             )
         else:
-            st.info("No keyword spikes detected above threshold. Spike detection requires 3+ days of scraping history.")
+            st.info(
+                "No keyword spikes detected above threshold. Spike detection requires 3+ days of scraping history."
+            )
     except Exception as e:
         st.error(f"Error loading spike data: {e}")
 
@@ -387,7 +427,9 @@ with tab_analytics:
                 if trend:
                     trend_df = pd.DataFrame(trend)
                     fig_trend = px.line(
-                        trend_df, x="date", y="count",
+                        trend_df,
+                        x="date",
+                        y="count",
                         title=f"Daily frequency: {selected_term}",
                         markers=True,
                     )
@@ -409,8 +451,12 @@ with tab_analytics:
             if "credibility_score" in source_df.columns:
                 source_df = source_df.sort_values("credibility_score", ascending=True)
                 fig_cred = px.bar(
-                    source_df, x="credibility_score", y="name", orientation="h",
-                    color="credibility_score", color_continuous_scale="Greens",
+                    source_df,
+                    x="credibility_score",
+                    y="name",
+                    orientation="h",
+                    color="credibility_score",
+                    color_continuous_scale="Greens",
                     labels={"credibility_score": "Credibility Score", "name": "Source"},
                     title="Intelligence Source Credibility",
                 )
@@ -437,28 +483,39 @@ with tab_scoring:
                 beta_val = src.get("bayesian_beta", 2.0) or 2.0
                 bayesian_cred = round(alpha / (alpha + beta_val), 4)
                 static_cred = src.get("credibility_score", 0.5) or 0.5
-                cred_data.append({
-                    "Source": src["name"],
-                    "Static Credibility": static_cred,
-                    "Bayesian Credibility": bayesian_cred,
-                    "Alpha": alpha,
-                    "Beta": beta_val,
-                    "TP": src.get("true_positives", 0) or 0,
-                    "FP": src.get("false_positives", 0) or 0,
-                })
+                cred_data.append(
+                    {
+                        "Source": src["name"],
+                        "Static Credibility": static_cred,
+                        "Bayesian Credibility": bayesian_cred,
+                        "Alpha": alpha,
+                        "Beta": beta_val,
+                        "TP": src.get("true_positives", 0) or 0,
+                        "FP": src.get("false_positives", 0) or 0,
+                    }
+                )
 
             cred_df = pd.DataFrame(cred_data)
             fig_cred = go.Figure()
-            fig_cred.add_trace(go.Bar(
-                name="Static", x=cred_df["Source"], y=cred_df["Static Credibility"],
-                marker_color="#94a3b8",
-            ))
-            fig_cred.add_trace(go.Bar(
-                name="Bayesian", x=cred_df["Source"], y=cred_df["Bayesian Credibility"],
-                marker_color="#f97316",
-            ))
+            fig_cred.add_trace(
+                go.Bar(
+                    name="Static",
+                    x=cred_df["Source"],
+                    y=cred_df["Static Credibility"],
+                    marker_color="#94a3b8",
+                )
+            )
+            fig_cred.add_trace(
+                go.Bar(
+                    name="Bayesian",
+                    x=cred_df["Source"],
+                    y=cred_df["Bayesian Credibility"],
+                    marker_color="#f97316",
+                )
+            )
             fig_cred.update_layout(
-                barmode="group", height=400,
+                barmode="group",
+                height=400,
                 yaxis_title="Credibility Score",
                 title="Static vs Bayesian Credibility by Source",
             )
@@ -476,31 +533,73 @@ with tab_scoring:
         eval_data = requests.get(f"{API_URL}/analytics/evaluation").json()
         if eval_data:
             eval_df = pd.DataFrame(eval_data)
-            display_cols = [c for c in [
-                "source_name", "true_positives", "false_positives", "total_reviewed",
-                "precision", "recall", "f1_score", "bayesian_credibility"
-            ] if c in eval_df.columns]
+            display_cols = [
+                c
+                for c in [
+                    "source_name",
+                    "true_positives",
+                    "false_positives",
+                    "total_reviewed",
+                    "precision",
+                    "recall",
+                    "f1_score",
+                    "bayesian_credibility",
+                ]
+                if c in eval_df.columns
+            ]
             if display_cols:
                 st.dataframe(
-                    eval_df[display_cols].rename(columns={
-                        "source_name": "Source", "true_positives": "TP",
-                        "false_positives": "FP", "total_reviewed": "Reviewed",
-                        "precision": "Precision", "recall": "Recall",
-                        "f1_score": "F1 Score", "bayesian_credibility": "Bayesian Cred",
-                    }),
-                    use_container_width=True, hide_index=True,
+                    eval_df[display_cols].rename(
+                        columns={
+                            "source_name": "Source",
+                            "true_positives": "TP",
+                            "false_positives": "FP",
+                            "total_reviewed": "Reviewed",
+                            "precision": "Precision",
+                            "recall": "Recall",
+                            "f1_score": "F1 Score",
+                            "bayesian_credibility": "Bayesian Cred",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
                 )
 
                 # Grouped bar chart for P/R/F1
                 if len(eval_df) > 0:
                     fig_prf = go.Figure()
-                    fig_prf.add_trace(go.Bar(name="Precision", x=eval_df["source_name"], y=eval_df["precision"], marker_color="#22c55e"))
-                    fig_prf.add_trace(go.Bar(name="Recall", x=eval_df["source_name"], y=eval_df["recall"], marker_color="#3b82f6"))
-                    fig_prf.add_trace(go.Bar(name="F1", x=eval_df["source_name"], y=eval_df["f1_score"], marker_color="#f97316"))
-                    fig_prf.update_layout(barmode="group", height=400, title="Evaluation Metrics by Source")
+                    fig_prf.add_trace(
+                        go.Bar(
+                            name="Precision",
+                            x=eval_df["source_name"],
+                            y=eval_df["precision"],
+                            marker_color="#22c55e",
+                        )
+                    )
+                    fig_prf.add_trace(
+                        go.Bar(
+                            name="Recall",
+                            x=eval_df["source_name"],
+                            y=eval_df["recall"],
+                            marker_color="#3b82f6",
+                        )
+                    )
+                    fig_prf.add_trace(
+                        go.Bar(
+                            name="F1",
+                            x=eval_df["source_name"],
+                            y=eval_df["f1_score"],
+                            marker_color="#f97316",
+                        )
+                    )
+                    fig_prf.update_layout(
+                        barmode="group", height=400, title="Evaluation Metrics by Source"
+                    )
                     st.plotly_chart(fig_prf, use_container_width=True)
         else:
-            st.info("No evaluation data yet. Classify alerts as TP/FP in the Alert Feed to generate metrics.")
+            st.info(
+                "No evaluation data yet. Classify alerts as TP/FP in the Alert Feed to generate metrics."
+            )
     except Exception as e:
         st.error(f"Error loading evaluation data: {e}")
 
@@ -521,32 +620,56 @@ with tab_scoring:
         incidents = backtest.get("incidents", [])
         if incidents:
             bt_df = pd.DataFrame(incidents)
-            display_cols = [c for c in [
-                "incident", "expected_severity", "baseline_score", "baseline_severity",
-                "full_score", "full_severity", "score_improvement"
-            ] if c in bt_df.columns]
+            display_cols = [
+                c
+                for c in [
+                    "incident",
+                    "expected_severity",
+                    "baseline_score",
+                    "baseline_severity",
+                    "full_score",
+                    "full_severity",
+                    "score_improvement",
+                ]
+                if c in bt_df.columns
+            ]
             st.dataframe(
-                bt_df[display_cols].rename(columns={
-                    "incident": "Incident", "expected_severity": "Expected",
-                    "baseline_score": "Baseline Score", "baseline_severity": "Baseline Severity",
-                    "full_score": "Full Score", "full_severity": "Full Severity",
-                    "score_improvement": "Improvement",
-                }),
-                use_container_width=True, hide_index=True,
+                bt_df[display_cols].rename(
+                    columns={
+                        "incident": "Incident",
+                        "expected_severity": "Expected",
+                        "baseline_score": "Baseline Score",
+                        "baseline_severity": "Baseline Severity",
+                        "full_score": "Full Score",
+                        "full_severity": "Full Severity",
+                        "score_improvement": "Improvement",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
             )
 
             # Chart: baseline vs full scores
             fig_bt = go.Figure()
-            fig_bt.add_trace(go.Bar(
-                name="Baseline", x=bt_df["incident"], y=bt_df["baseline_score"],
-                marker_color="#94a3b8",
-            ))
-            fig_bt.add_trace(go.Bar(
-                name="Full Model", x=bt_df["incident"], y=bt_df["full_score"],
-                marker_color="#f97316",
-            ))
+            fig_bt.add_trace(
+                go.Bar(
+                    name="Baseline",
+                    x=bt_df["incident"],
+                    y=bt_df["baseline_score"],
+                    marker_color="#94a3b8",
+                )
+            )
+            fig_bt.add_trace(
+                go.Bar(
+                    name="Full Model",
+                    x=bt_df["incident"],
+                    y=bt_df["full_score"],
+                    marker_color="#f97316",
+                )
+            )
             fig_bt.update_layout(
-                barmode="group", height=450,
+                barmode="group",
+                height=450,
                 title="Baseline vs Full Scoring Model — Golden Dataset",
                 yaxis_title="Risk Score",
                 xaxis_tickangle=-30,
@@ -569,24 +692,39 @@ with tab_perf:
         perf_data = requests.get(f"{API_URL}/analytics/performance", params={"limit": 20}).json()
         if perf_data:
             perf_df = pd.DataFrame(perf_data)
-            display_cols = [c for c in [
-                "started_at", "scraper_type", "total_alerts", "duration_seconds",
-                "alerts_per_second", "status"
-            ] if c in perf_df.columns]
+            display_cols = [
+                c
+                for c in [
+                    "started_at",
+                    "scraper_type",
+                    "total_alerts",
+                    "duration_seconds",
+                    "alerts_per_second",
+                    "status",
+                ]
+                if c in perf_df.columns
+            ]
             st.dataframe(
-                perf_df[display_cols].rename(columns={
-                    "started_at": "Started", "scraper_type": "Scraper",
-                    "total_alerts": "Alerts", "duration_seconds": "Duration (s)",
-                    "alerts_per_second": "Alerts/sec", "status": "Status",
-                }),
-                use_container_width=True, hide_index=True,
+                perf_df[display_cols].rename(
+                    columns={
+                        "started_at": "Started",
+                        "scraper_type": "Scraper",
+                        "total_alerts": "Alerts",
+                        "duration_seconds": "Duration (s)",
+                        "alerts_per_second": "Alerts/sec",
+                        "status": "Status",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
             )
 
             # Duration trend
             if len(perf_df) > 1 and "duration_seconds" in perf_df.columns:
                 fig_dur = px.line(
                     perf_df.sort_values("started_at"),
-                    x="started_at", y="duration_seconds",
+                    x="started_at",
+                    y="duration_seconds",
                     title="Scrape Duration Over Time",
                     markers=True,
                 )
@@ -597,7 +735,8 @@ with tab_perf:
             if len(perf_df) > 1 and "alerts_per_second" in perf_df.columns:
                 fig_aps = px.line(
                     perf_df.sort_values("started_at"),
-                    x="started_at", y="alerts_per_second",
+                    x="started_at",
+                    y="alerts_per_second",
                     title="Alerts per Second Over Time",
                     markers=True,
                     color_discrete_sequence=["#f97316"],
@@ -628,10 +767,14 @@ with tab_perf:
             cluster_df = pd.DataFrame(clusters)
             display_cols = [c for c in ["title", "dup_count"] if c in cluster_df.columns]
             st.dataframe(
-                cluster_df[display_cols].rename(columns={
-                    "title": "Original Alert", "dup_count": "Duplicate Count",
-                }),
-                use_container_width=True, hide_index=True,
+                cluster_df[display_cols].rename(
+                    columns={
+                        "title": "Original Alert",
+                        "dup_count": "Duplicate Count",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
             )
     except Exception as e:
         st.error(f"Error loading dedup data: {e}")
@@ -653,8 +796,15 @@ with tab_config:
         with kc2:
             new_category = st.selectbox(
                 "Category",
-                ["general", "malware", "incident", "vulnerability", "threat_actor",
-                 "tactics", "financial"],
+                [
+                    "general",
+                    "malware",
+                    "incident",
+                    "vulnerability",
+                    "threat_actor",
+                    "tactics",
+                    "financial",
+                ],
             )
         with kc3:
             new_weight = st.slider("Threat Weight", 0.1, 5.0, 1.0, 0.1)
@@ -674,7 +824,9 @@ with tab_config:
         keywords = requests.get(f"{API_URL}/keywords").json()
         if keywords:
             kw_df = pd.DataFrame(keywords)
-            display_cols = [c for c in ["id", "term", "category", "weight", "active"] if c in kw_df.columns]
+            display_cols = [
+                c for c in ["id", "term", "category", "weight", "active"] if c in kw_df.columns
+            ]
             st.dataframe(kw_df[display_cols], use_container_width=True, hide_index=True)
     except Exception:
         pass
@@ -703,7 +855,9 @@ with tab_config:
 
     # --- Rescore ---
     st.markdown("### Re-score Alerts")
-    st.write("Re-calculate risk scores for all unreviewed alerts using current keyword weights, Bayesian credibility, and Z-score frequency factors.")
+    st.write(
+        "Re-calculate risk scores for all unreviewed alerts using current keyword weights, Bayesian credibility, and Z-score frequency factors."
+    )
     if st.button("Re-score All Unreviewed Alerts"):
         try:
             result = requests.post(f"{API_URL}/alerts/rescore").json()

@@ -12,19 +12,21 @@ import asyncio
 import time
 from datetime import datetime
 
+from database.init_db import get_connection
+from scraper.pastebin_monitor import run_pastebin_scraper
+from scraper.reddit_scraper import run_reddit_scraper
 from scraper.rss_scraper import (
-    run_rss_scraper,
-    match_keywords,
+    alert_exists,
     get_active_keywords,
     get_active_sources,
-    alert_exists,
+    match_keywords,
+    parse_entry_published_at,
+    run_rss_scraper,
 )
-from scraper.reddit_scraper import run_reddit_scraper
-from scraper.pastebin_monitor import run_pastebin_scraper
-from database.init_db import get_connection
 
 try:
     import aiohttp
+
     ASYNC_AVAILABLE = True
 except ImportError:
     ASYNC_AVAILABLE = False
@@ -59,6 +61,19 @@ def _record_scrape_run(scraper_type, started_at, total_alerts, status="completed
         print(f"Warning: Could not record scrape run: {e}")
 
 
+def _build_run_frequency_snapshot():
+    """Create a run-level frequency snapshot to keep scoring order-independent."""
+    from analytics.risk_scoring import build_frequency_snapshot
+
+    conn = get_connection()
+    try:
+        keyword_rows = conn.execute("SELECT id FROM keywords WHERE active = 1").fetchall()
+        keyword_ids = [row["id"] for row in keyword_rows]
+        return build_frequency_snapshot(conn, keyword_ids=keyword_ids)
+    finally:
+        conn.close()
+
+
 async def _fetch_url_async(session, url, timeout=15):
     """Fetch a URL asynchronously, return text content."""
     try:
@@ -69,17 +84,26 @@ async def _fetch_url_async(session, url, timeout=15):
         return None
 
 
-async def run_rss_scraper_async():
+async def run_rss_scraper_async(frequency_snapshot=None):
     """
     Async RSS scraper: fetch all RSS feeds concurrently via aiohttp,
     then parse and process synchronously.
     """
     import feedparser
-    from analytics.risk_scoring import increment_keyword_frequency, score_alert
+
     from analytics.dedup import check_duplicate
+    from analytics.risk_scoring import (
+        build_frequency_snapshot,
+        increment_keyword_frequency,
+        score_alert,
+    )
 
     conn = get_connection()
     keywords = get_active_keywords(conn)
+    if frequency_snapshot is None:
+        frequency_snapshot = build_frequency_snapshot(
+            conn, keyword_ids=[keyword["id"] for keyword in keywords]
+        )
     sources = get_active_sources(conn, "rss")
     new_alerts = 0
     duplicates = 0
@@ -102,6 +126,7 @@ async def run_rss_scraper_async():
             title = entry.get("title", "")
             content = entry.get("summary", entry.get("description", ""))
             url = entry.get("link", "")
+            published_at = parse_entry_published_at(entry)
             combined_text = f"{title} {content}"
             matches = match_keywords(combined_text, keywords)
 
@@ -111,15 +136,34 @@ async def run_rss_scraper_async():
                     conn.execute(
                         """INSERT INTO alerts
                            (source_id, keyword_id, title, content, url, matched_term,
-                            content_hash, duplicate_of, severity)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (source["id"], keyword["id"], title, content[:2000], url,
-                         keyword["term"], content_hash, duplicate_of, "low"),
+                            content_hash, duplicate_of, published_at, severity)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            source["id"],
+                            keyword["id"],
+                            title,
+                            content[:2000],
+                            url,
+                            keyword["term"],
+                            content_hash,
+                            duplicate_of,
+                            published_at,
+                            "low",
+                        ),
                     )
                     alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     if duplicate_of is None:
+                        score_args = frequency_snapshot.get(keyword["id"])
+                        score_alert(
+                            conn,
+                            alert_id,
+                            keyword["id"],
+                            source["id"],
+                            published_at=published_at,
+                            frequency_override=score_args[0] if score_args else None,
+                            z_score_override=score_args[1] if score_args else None,
+                        )
                         increment_keyword_frequency(conn, keyword["id"])
-                        score_alert(conn, alert_id, keyword["id"], source["id"])
                         new_alerts += 1
                     else:
                         duplicates += 1
@@ -130,16 +174,25 @@ async def run_rss_scraper_async():
     return new_alerts
 
 
-async def run_reddit_scraper_async():
+async def run_reddit_scraper_async(frequency_snapshot=None):
     """
     Async Reddit scraper: fetch all Reddit RSS feeds concurrently.
     """
     import feedparser
-    from analytics.risk_scoring import increment_keyword_frequency, score_alert
+
     from analytics.dedup import check_duplicate
+    from analytics.risk_scoring import (
+        build_frequency_snapshot,
+        increment_keyword_frequency,
+        score_alert,
+    )
 
     conn = get_connection()
     keywords = get_active_keywords(conn)
+    if frequency_snapshot is None:
+        frequency_snapshot = build_frequency_snapshot(
+            conn, keyword_ids=[keyword["id"] for keyword in keywords]
+        )
     sources = conn.execute(
         "SELECT id, name, url FROM sources WHERE source_type = 'reddit' AND active = 1"
     ).fetchall()
@@ -163,6 +216,7 @@ async def run_reddit_scraper_async():
             title = entry.get("title", "")
             content = entry.get("summary", "")
             url = entry.get("link", "")
+            published_at = parse_entry_published_at(entry)
             combined_text = f"{title} {content}"
             matches = match_keywords(combined_text, keywords)
 
@@ -172,15 +226,34 @@ async def run_reddit_scraper_async():
                     conn.execute(
                         """INSERT INTO alerts
                            (source_id, keyword_id, title, content, url, matched_term,
-                            content_hash, duplicate_of, severity)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (source["id"], keyword["id"], title, content[:2000], url,
-                         keyword["term"], content_hash, duplicate_of, "low"),
+                            content_hash, duplicate_of, published_at, severity)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            source["id"],
+                            keyword["id"],
+                            title,
+                            content[:2000],
+                            url,
+                            keyword["term"],
+                            content_hash,
+                            duplicate_of,
+                            published_at,
+                            "low",
+                        ),
                     )
                     alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                     if duplicate_of is None:
+                        score_args = frequency_snapshot.get(keyword["id"])
+                        score_alert(
+                            conn,
+                            alert_id,
+                            keyword["id"],
+                            source["id"],
+                            published_at=published_at,
+                            frequency_override=score_args[0] if score_args else None,
+                            z_score_override=score_args[1] if score_args else None,
+                        )
                         increment_keyword_frequency(conn, keyword["id"])
-                        score_alert(conn, alert_id, keyword["id"], source["id"])
                         new_alerts += 1
                     else:
                         duplicates += 1
@@ -196,14 +269,15 @@ async def run_all_scrapers_async():
     Orchestrate all async scrapers concurrently.
     RSS and Reddit run in parallel; Pastebin runs sync after (rate-limited).
     """
-    rss_task = run_rss_scraper_async()
-    reddit_task = run_reddit_scraper_async()
+    frequency_snapshot = _build_run_frequency_snapshot()
+    rss_task = run_rss_scraper_async(frequency_snapshot=frequency_snapshot)
+    reddit_task = run_reddit_scraper_async(frequency_snapshot=frequency_snapshot)
 
     # RSS and Reddit concurrently
     rss_count, reddit_count = await asyncio.gather(rss_task, reddit_task)
 
     # Pastebin stays sync (individual paste fetches are rate-limited)
-    pastebin_count = run_pastebin_scraper()
+    pastebin_count = run_pastebin_scraper(frequency_snapshot=frequency_snapshot)
 
     total = rss_count + reddit_count + pastebin_count
     return total
@@ -225,9 +299,10 @@ def run_all_scrapers():
             total = asyncio.run(run_all_scrapers_async())
         else:
             print("Running scrapers (sync mode — install aiohttp for async)...")
-            total += run_rss_scraper()
-            total += run_reddit_scraper()
-            total += run_pastebin_scraper()
+            frequency_snapshot = _build_run_frequency_snapshot()
+            total += run_rss_scraper(frequency_snapshot=frequency_snapshot)
+            total += run_reddit_scraper(frequency_snapshot=frequency_snapshot)
+            total += run_pastebin_scraper(frequency_snapshot=frequency_snapshot)
     except Exception as e:
         print(f"Scraper error: {e}")
         status = "error"

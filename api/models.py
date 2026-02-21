@@ -1,6 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel
 
 
 class KeywordCreate(BaseModel):
@@ -26,6 +27,7 @@ class AlertResponse(BaseModel):
     matched_term: str
     severity: str
     reviewed: int
+    published_at: Optional[str]
     created_at: str
 
 

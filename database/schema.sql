@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     matched_term TEXT,
     content_hash TEXT,
     duplicate_of INTEGER,
+    published_at TIMESTAMP,
     risk_score REAL DEFAULT 0.0,
     severity TEXT DEFAULT 'low',
     reviewed INTEGER DEFAULT 0,

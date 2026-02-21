@@ -1,5 +1,5 @@
-import sqlite3
 import os
+import sqlite3
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "osint_monitor.db")
 
@@ -35,6 +35,7 @@ def migrate_schema():
         "ALTER TABLE alerts ADD COLUMN risk_score REAL DEFAULT 0.0",
         "ALTER TABLE alerts ADD COLUMN content_hash TEXT",
         "ALTER TABLE alerts ADD COLUMN duplicate_of INTEGER",
+        "ALTER TABLE alerts ADD COLUMN published_at TIMESTAMP",
         "ALTER TABLE alert_scores ADD COLUMN z_score REAL DEFAULT 0.0",
         "ALTER TABLE threat_actors ADD COLUMN alert_count INTEGER DEFAULT 0",
     ]
@@ -49,6 +50,7 @@ def migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_alerts_content_hash ON alerts(content_hash)",
         "CREATE INDEX IF NOT EXISTS idx_alerts_duplicate_of ON alerts(duplicate_of)",
         "CREATE INDEX IF NOT EXISTS idx_alerts_created_date ON alerts(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_alerts_published_date ON alerts(published_at)",
         "CREATE INDEX IF NOT EXISTS idx_keyword_frequency_kw_date ON keyword_frequency(keyword_id, date)",
     ]
     for sql in indexes:
@@ -60,6 +62,7 @@ def migrate_schema():
     conn.execute("UPDATE keywords SET weight = 1.0 WHERE weight IS NULL")
     conn.execute("UPDATE sources SET credibility_score = 0.5 WHERE credibility_score IS NULL")
     conn.execute("UPDATE alerts SET risk_score = 0.0 WHERE risk_score IS NULL")
+    conn.execute("UPDATE alerts SET published_at = created_at WHERE published_at IS NULL")
     conn.commit()
     conn.close()
 
@@ -75,9 +78,7 @@ def seed_default_sources():
         ("r/threatintel", "https://www.reddit.com/r/threatintel/.rss", "reddit", 0.5),
     ]
     for name, url, source_type, credibility in sources:
-        existing = conn.execute(
-            "SELECT id FROM sources WHERE url = ?", (url,)
-        ).fetchone()
+        existing = conn.execute("SELECT id FROM sources WHERE url = ?", (url,)).fetchone()
         if existing:
             conn.execute(
                 "UPDATE sources SET credibility_score = ? WHERE id = ?",
@@ -116,9 +117,7 @@ def seed_default_keywords():
         ("privilege escalation", "vulnerability", 3.5),
     ]
     for term, category, weight in keywords:
-        existing = conn.execute(
-            "SELECT id FROM keywords WHERE term = ?", (term,)
-        ).fetchone()
+        existing = conn.execute("SELECT id FROM keywords WHERE term = ?", (term,)).fetchone()
         if existing:
             conn.execute(
                 "UPDATE keywords SET category = ?, weight = ? WHERE id = ?",
@@ -143,7 +142,11 @@ def seed_threat_actors():
         ("APT28", "Fancy Bear, Sofacy, Sednit", "Russian state-sponsored cyber espionage group"),
         ("APT29", "Cozy Bear, The Dukes, Nobelium", "Russian state-sponsored, SolarWinds campaign"),
         ("Lazarus Group", "Hidden Cobra, Zinc, Diamond Sleet", "North Korean state-sponsored"),
-        ("APT41", "Winnti, Barium, Wicked Panda", "Chinese state-sponsored dual espionage/financial"),
+        (
+            "APT41",
+            "Winnti, Barium, Wicked Panda",
+            "Chinese state-sponsored dual espionage/financial",
+        ),
         ("Conti", "Wizard Spider", "Russian-speaking ransomware syndicate"),
         ("LockBit", "LockBit 3.0, LockBit Black", "Ransomware-as-a-Service operation"),
         ("BlackCat", "ALPHV, Noberus", "Rust-based ransomware group"),
@@ -152,9 +155,7 @@ def seed_threat_actors():
         ("Cl0p", "TA505, FIN11", "Ransomware group, MOVEit campaigns"),
     ]
     for name, aliases, description in actors:
-        existing = conn.execute(
-            "SELECT id FROM threat_actors WHERE name = ?", (name,)
-        ).fetchone()
+        existing = conn.execute("SELECT id FROM threat_actors WHERE name = ?", (name,)).fetchone()
         if not existing:
             conn.execute(
                 "INSERT INTO threat_actors (name, aliases, description) VALUES (?, ?, ?)",

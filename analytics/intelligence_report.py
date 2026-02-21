@@ -6,8 +6,9 @@ Uses aggregation, ranking, and rule-based templates.
 
 import json
 from datetime import datetime, timedelta
-from database.init_db import get_connection
+
 from analytics.spike_detection import detect_spikes
+from database.init_db import get_connection
 
 
 def generate_daily_report(report_date=None):
@@ -26,9 +27,9 @@ def generate_daily_report(report_date=None):
     if report_date is None:
         report_date = datetime.utcnow().strftime("%Y-%m-%d")
 
-    next_date = (
-        datetime.strptime(report_date, "%Y-%m-%d") + timedelta(days=1)
-    ).strftime("%Y-%m-%d")
+    next_date = (datetime.strptime(report_date, "%Y-%m-%d") + timedelta(days=1)).strftime(
+        "%Y-%m-%d"
+    )
 
     # --- Top risks: highest scored unique alerts from the period ---
     top_alerts = conn.execute(
@@ -90,26 +91,28 @@ def generate_daily_report(report_date=None):
             WHERE LOWER(name) LIKE ? OR LOWER(aliases) LIKE ?""",
             (f"%{actor_kw['term'].lower()}%", f"%{actor_kw['term'].lower()}%"),
         ).fetchall()
-        active_actors.append({
-            "keyword": actor_kw["term"],
-            "mentions": actor_kw["count"],
-            "known_actors": [
-                {"name": m["name"], "aliases": m["aliases"]} for m in matches
-            ],
-        })
+        active_actors.append(
+            {
+                "keyword": actor_kw["term"],
+                "mentions": actor_kw["count"],
+                "known_actors": [{"name": m["name"], "aliases": m["aliases"]} for m in matches],
+            }
+        )
 
     # --- Build executive summary ---
     critical_count = severity_map.get("critical", 0)
     high_count = severity_map.get("high", 0)
     executive_summary = _build_executive_summary(
-        report_date, total, critical_count, high_count,
-        [dict(a) for a in top_alerts[:3]], spikes[:3],
+        report_date,
+        total,
+        critical_count,
+        high_count,
+        [dict(a) for a in top_alerts[:3]],
+        spikes[:3],
     )
 
     # --- Escalation recommendations ---
-    escalations = _build_escalations(
-        [dict(a) for a in top_alerts], spikes, active_actors
-    )
+    escalations = _build_escalations([dict(a) for a in top_alerts], spikes, active_actors)
 
     report = {
         "report_date": report_date,
@@ -197,42 +200,48 @@ def _build_escalations(top_alerts, spikes, actors):
     # Critical alerts always escalate
     for alert in top_alerts:
         if alert.get("severity") == "critical":
-            escalations.append({
-                "priority": "IMMEDIATE",
-                "type": "critical_alert",
-                "title": alert.get("title", "")[:100],
-                "risk_score": alert.get("risk_score", 0),
-                "action": "Review and assess impact. Brief stakeholders within 1 hour.",
-            })
+            escalations.append(
+                {
+                    "priority": "IMMEDIATE",
+                    "type": "critical_alert",
+                    "title": alert.get("title", "")[:100],
+                    "risk_score": alert.get("risk_score", 0),
+                    "action": "Review and assess impact. Brief stakeholders within 1 hour.",
+                }
+            )
 
     # High-ratio spikes escalate
     for spike in spikes:
         if spike["spike_ratio"] >= 3.0:
-            escalations.append({
-                "priority": "HIGH",
-                "type": "frequency_spike",
-                "term": spike["term"],
-                "spike_ratio": spike["spike_ratio"],
-                "action": (
-                    f"'{spike['term']}' activity is {spike['spike_ratio']}x above baseline. "
-                    "Investigate root cause."
-                ),
-            })
+            escalations.append(
+                {
+                    "priority": "HIGH",
+                    "type": "frequency_spike",
+                    "term": spike["term"],
+                    "spike_ratio": spike["spike_ratio"],
+                    "action": (
+                        f"'{spike['term']}' activity is {spike['spike_ratio']}x above baseline. "
+                        "Investigate root cause."
+                    ),
+                }
+            )
 
     # Known threat actor activity escalates
     for actor in actors:
         if actor["known_actors"] and actor["mentions"] >= 2:
             actor_names = ", ".join(a["name"] for a in actor["known_actors"])
-            escalations.append({
-                "priority": "HIGH",
-                "type": "threat_actor_activity",
-                "actors": actor_names,
-                "mentions": actor["mentions"],
-                "action": (
-                    f"Increased chatter referencing {actor_names}. "
-                    "Cross-reference with IOC feeds."
-                ),
-            })
+            escalations.append(
+                {
+                    "priority": "HIGH",
+                    "type": "threat_actor_activity",
+                    "actors": actor_names,
+                    "mentions": actor["mentions"],
+                    "action": (
+                        f"Increased chatter referencing {actor_names}. "
+                        "Cross-reference with IOC feeds."
+                    ),
+                }
+            )
 
     priority_order = {"IMMEDIATE": 0, "HIGH": 1, "MEDIUM": 2}
     escalations.sort(key=lambda x: priority_order.get(x["priority"], 3))

@@ -16,7 +16,7 @@ Severity derivation:
   0-39   = low
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 def compute_risk_score(keyword_weight, source_credibility, frequency_factor, recency_hours):
@@ -27,13 +27,15 @@ def compute_risk_score(keyword_weight, source_credibility, frequency_factor, rec
         keyword_weight: Weight of the matched keyword (0.1-5.0)
         source_credibility: Bayesian credibility of the source (0.0-1.0)
         frequency_factor: Z-score-derived multiplier (1.0-4.0)
-        recency_hours: Hours since the alert was created
+        recency_hours: Hours since the source event was published
 
     Returns:
         (risk_score, severity) tuple
     """
     recency_factor = max(0.1, 1.0 - (recency_hours / 168.0))
-    raw_score = (keyword_weight * frequency_factor * source_credibility * 20.0) + (recency_factor * 10.0)
+    raw_score = (keyword_weight * frequency_factor * source_credibility * 20.0) + (
+        recency_factor * 10.0
+    )
     risk_score = round(min(100.0, max(0.0, raw_score)), 1)
     severity = score_to_severity(risk_score)
     return risk_score, severity
@@ -52,9 +54,7 @@ def score_to_severity(score):
 
 def get_keyword_weight(conn, keyword_id):
     """Fetch keyword weight from database, defaulting to 1.0."""
-    row = conn.execute(
-        "SELECT weight FROM keywords WHERE id = ?", (keyword_id,)
-    ).fetchone()
+    row = conn.execute("SELECT weight FROM keywords WHERE id = ?", (keyword_id,)).fetchone()
     return row["weight"] if row and row["weight"] else 1.0
 
 
@@ -118,7 +118,7 @@ def get_frequency_factor(conn, keyword_id):
 
     mean = sum(counts) / len(counts)
     variance = sum((c - mean) ** 2 for c in counts) / len(counts)
-    std_dev = variance ** 0.5
+    std_dev = variance**0.5
 
     if std_dev < 0.5:
         std_dev = 0.5  # Floor to prevent division-by-near-zero
@@ -136,19 +136,64 @@ def get_frequency_factor(conn, keyword_id):
     return factor, round(z_score, 2)
 
 
-def increment_keyword_frequency(conn, keyword_id):
-    """Increment today's count for a keyword. Called each time a keyword matches."""
+def build_frequency_snapshot(conn, keyword_ids=None):
+    """Build a keyword -> (frequency_factor, z_score) snapshot for a scoring cycle."""
+    if keyword_ids is None:
+        rows = conn.execute("SELECT id FROM keywords WHERE active = 1").fetchall()
+        keyword_ids = [row["id"] for row in rows]
+    return {keyword_id: get_frequency_factor(conn, keyword_id) for keyword_id in keyword_ids}
+
+
+def increment_keyword_frequency(conn, keyword_id, increment_by=1):
+    """Increment today's frequency count for a keyword."""
+    if increment_by <= 0:
+        return
     today = datetime.utcnow().strftime("%Y-%m-%d")
     conn.execute(
         """INSERT INTO keyword_frequency (keyword_id, date, count)
-        VALUES (?, ?, 1)
+        VALUES (?, ?, ?)
         ON CONFLICT(keyword_id, date)
-        DO UPDATE SET count = count + 1""",
-        (keyword_id, today),
+        DO UPDATE SET count = count + excluded.count""",
+        (keyword_id, today, increment_by),
     )
 
 
-def score_alert(conn, alert_id, keyword_id, source_id, created_at=None):
+def _parse_timestamp(value):
+    """Parse supported timestamp formats into a naive UTC datetime."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    dt = datetime.strptime(raw, fmt)
+                    break
+                except ValueError:
+                    dt = None
+            if dt is None:
+                return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def score_alert(
+    conn,
+    alert_id,
+    keyword_id,
+    source_id,
+    created_at=None,
+    published_at=None,
+    frequency_override=None,
+    z_score_override=None,
+):
     """
     Full scoring pipeline for a single alert.
     Computes score, updates alert, and stores audit trail in alert_scores.
@@ -156,17 +201,14 @@ def score_alert(conn, alert_id, keyword_id, source_id, created_at=None):
     """
     keyword_weight = get_keyword_weight(conn, keyword_id)
     source_credibility = get_source_credibility(conn, source_id)
-    frequency_factor, z_score = get_frequency_factor(conn, keyword_id)
-
-    if created_at:
-        try:
-            created_dt = datetime.strptime(str(created_at), "%Y-%m-%d %H:%M:%S")
-        except (ValueError, TypeError):
-            created_dt = datetime.utcnow()
+    if frequency_override is not None:
+        frequency_factor = frequency_override
+        z_score = z_score_override if z_score_override is not None else 0.0
     else:
-        created_dt = datetime.utcnow()
+        frequency_factor, z_score = get_frequency_factor(conn, keyword_id)
 
-    recency_hours = (datetime.utcnow() - created_dt).total_seconds() / 3600.0
+    event_dt = _parse_timestamp(published_at) or _parse_timestamp(created_at) or datetime.utcnow()
+    recency_hours = (datetime.utcnow() - event_dt).total_seconds() / 3600.0
     recency_factor = max(0.1, 1.0 - (recency_hours / 168.0))
 
     risk_score, severity = compute_risk_score(
@@ -181,7 +223,15 @@ def score_alert(conn, alert_id, keyword_id, source_id, created_at=None):
         """INSERT INTO alert_scores
         (alert_id, keyword_weight, source_credibility, frequency_factor, z_score, recency_factor, final_score)
         VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (alert_id, keyword_weight, source_credibility, frequency_factor, z_score, recency_factor, risk_score),
+        (
+            alert_id,
+            keyword_weight,
+            source_credibility,
+            frequency_factor,
+            z_score,
+            recency_factor,
+            risk_score,
+        ),
     )
     return risk_score
 
@@ -193,14 +243,18 @@ def rescore_all_alerts(conn):
     Returns count of alerts rescored.
     """
     alerts = conn.execute(
-        """SELECT a.id, a.keyword_id, a.source_id, a.created_at
+        """SELECT a.id, a.keyword_id, a.source_id, a.created_at, a.published_at
         FROM alerts a WHERE a.reviewed = 0"""
     ).fetchall()
     count = 0
     for alert in alerts:
         score_alert(
-            conn, alert["id"], alert["keyword_id"],
-            alert["source_id"], alert["created_at"]
+            conn,
+            alert["id"],
+            alert["keyword_id"],
+            alert["source_id"],
+            created_at=alert["created_at"],
+            published_at=alert["published_at"],
         )
         count += 1
     conn.commit()
@@ -248,9 +302,7 @@ def compute_evaluation_metrics(conn, source_id=None):
     Recall = TP / (TP + FN) where FN ~ reviewed but unclassified
     """
     if source_id is not None:
-        source = conn.execute(
-            "SELECT * FROM sources WHERE id = ?", (source_id,)
-        ).fetchone()
+        source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
         sources = [source] if source else []
     else:
         sources = conn.execute("SELECT * FROM sources").fetchall()
@@ -272,17 +324,19 @@ def compute_evaluation_metrics(conn, source_id=None):
         alpha = src["bayesian_alpha"] or 2.0
         beta = src["bayesian_beta"] or 2.0
 
-        results.append({
-            "source_id": src["id"],
-            "source_name": src["name"],
-            "true_positives": tp,
-            "false_positives": fp,
-            "total_reviewed": reviewed_count,
-            "precision": round(precision, 4),
-            "recall": round(recall, 4),
-            "f1_score": round(f1, 4),
-            "bayesian_credibility": round(alpha / (alpha + beta), 4),
-            "static_credibility": src["credibility_score"] or 0.5,
-        })
+        results.append(
+            {
+                "source_id": src["id"],
+                "source_name": src["name"],
+                "true_positives": tp,
+                "false_positives": fp,
+                "total_reviewed": reviewed_count,
+                "precision": round(precision, 4),
+                "recall": round(recall, 4),
+                "f1_score": round(f1, 4),
+                "bayesian_credibility": round(alpha / (alpha + beta), 4),
+                "static_credibility": src["credibility_score"] or 0.5,
+            }
+        )
 
     return results

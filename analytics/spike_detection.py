@@ -3,7 +3,8 @@ Spike detection for keyword frequency trends.
 Identifies keywords with unusual activity levels using Z-score analysis.
 """
 
-from datetime import datetime, timedelta, date
+from datetime import date, datetime, timedelta
+
 from database.init_db import get_connection
 
 
@@ -65,18 +66,20 @@ def detect_spikes(threshold=2.0, as_of_date=None):
             if len(counts) >= 3:
                 mean = sum(counts) / len(counts)
                 variance = sum((c - mean) ** 2 for c in counts) / len(counts)
-                std_dev = max(variance ** 0.5, 0.5)
+                std_dev = max(variance**0.5, 0.5)
                 z_score = round((row["today_count"] - mean) / std_dev, 2)
 
-            spikes.append({
-                "keyword_id": row["keyword_id"],
-                "term": row["term"],
-                "category": row["category"],
-                "today_count": row["today_count"],
-                "avg_7d": round(avg, 1),
-                "spike_ratio": round(ratio, 1),
-                "z_score": z_score,
-            })
+            spikes.append(
+                {
+                    "keyword_id": row["keyword_id"],
+                    "term": row["term"],
+                    "category": row["category"],
+                    "today_count": row["today_count"],
+                    "avg_7d": round(avg, 1),
+                    "spike_ratio": round(ratio, 1),
+                    "z_score": z_score,
+                }
+            )
 
     conn.close()
     spikes.sort(key=lambda x: x["spike_ratio"], reverse=True)

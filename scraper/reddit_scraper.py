@@ -1,9 +1,18 @@
 import feedparser
-from datetime import datetime
-from database.init_db import get_connection
-from scraper.rss_scraper import match_keywords, get_active_keywords, alert_exists
-from analytics.risk_scoring import increment_keyword_frequency, score_alert
+
 from analytics.dedup import check_duplicate
+from analytics.risk_scoring import (
+    build_frequency_snapshot,
+    increment_keyword_frequency,
+    score_alert,
+)
+from database.init_db import get_connection
+from scraper.rss_scraper import (
+    alert_exists,
+    get_active_keywords,
+    match_keywords,
+    parse_entry_published_at,
+)
 
 
 def fetch_reddit_rss(url):
@@ -15,7 +24,7 @@ def fetch_reddit_rss(url):
                 "title": entry.get("title", ""),
                 "content": entry.get("summary", ""),
                 "url": entry.get("link", ""),
-                "published": entry.get("published", str(datetime.utcnow())),
+                "published": parse_entry_published_at(entry),
             }
         )
     return entries
@@ -28,9 +37,13 @@ def get_reddit_sources(conn):
     return [dict(row) for row in cursor.fetchall()]
 
 
-def run_reddit_scraper():
+def run_reddit_scraper(frequency_snapshot=None):
     conn = get_connection()
     keywords = get_active_keywords(conn)
+    if frequency_snapshot is None:
+        frequency_snapshot = build_frequency_snapshot(
+            conn, keyword_ids=[keyword["id"] for keyword in keywords]
+        )
     sources = get_reddit_sources(conn)
     new_alerts = 0
     duplicates = 0
@@ -51,8 +64,8 @@ def run_reddit_scraper():
                     conn.execute(
                         """INSERT INTO alerts
                            (source_id, keyword_id, title, content, url, matched_term,
-                            content_hash, duplicate_of, severity)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            content_hash, duplicate_of, published_at, severity)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             source["id"],
                             keyword["id"],
@@ -62,14 +75,24 @@ def run_reddit_scraper():
                             keyword["term"],
                             content_hash,
                             duplicate_of,
+                            entry["published"],
                             "low",
                         ),
                     )
                     alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
                     if duplicate_of is None:
+                        score_args = frequency_snapshot.get(keyword["id"])
+                        score_alert(
+                            conn,
+                            alert_id,
+                            keyword["id"],
+                            source["id"],
+                            published_at=entry["published"],
+                            frequency_override=score_args[0] if score_args else None,
+                            z_score_override=score_args[1] if score_args else None,
+                        )
                         increment_keyword_frequency(conn, keyword["id"])
-                        score_alert(conn, alert_id, keyword["id"], source["id"])
                         new_alerts += 1
                     else:
                         duplicates += 1

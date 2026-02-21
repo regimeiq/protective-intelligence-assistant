@@ -5,9 +5,7 @@ from database.init_db import get_connection
 
 def _count_evaluation_rows():
     conn = get_connection()
-    count = conn.execute(
-        "SELECT COUNT(*) as count FROM evaluation_metrics"
-    ).fetchone()["count"]
+    count = conn.execute("SELECT COUNT(*) as count FROM evaluation_metrics").fetchone()["count"]
     conn.close()
     return count
 
@@ -52,9 +50,7 @@ def test_daily_report_uses_requested_date_for_spike_detection(client):
     report_date = report_dt.strftime("%Y-%m-%d")
 
     conn = get_connection()
-    keyword_id = conn.execute(
-        "SELECT id FROM keywords WHERE term = 'ransomware'"
-    ).fetchone()["id"]
+    keyword_id = conn.execute("SELECT id FROM keywords WHERE term = 'ransomware'").fetchone()["id"]
 
     for days_back in range(1, 8):
         day = (report_dt - timedelta(days=days_back)).strftime("%Y-%m-%d")

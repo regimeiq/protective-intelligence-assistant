@@ -168,6 +168,16 @@ python run.py dashboard
 - **API Docs:** http://localhost:8000/docs
 - **Dashboard:** http://localhost:8501
 
+## Code Quality
+
+```bash
+pip install -r requirements-dev.txt
+pre-commit install
+pre-commit run --all-files
+```
+
+The repo is configured for `black`, `isort`, and `ruff` via `pyproject.toml`.
+
 ## API Endpoints
 
 | Method | Endpoint | Description |

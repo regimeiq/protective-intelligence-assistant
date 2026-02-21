@@ -9,9 +9,16 @@ Usage:
     python run.py all         Start API + Dashboard (requires separate terminal for each)
 """
 
-import sys
 import subprocess
-from database.init_db import init_db, migrate_schema, seed_default_sources, seed_default_keywords, seed_threat_actors
+import sys
+
+from database.init_db import (
+    init_db,
+    migrate_schema,
+    seed_default_keywords,
+    seed_default_sources,
+    seed_threat_actors,
+)
 from scraper import run_all_scrapers
 
 
@@ -42,9 +49,7 @@ def main():
         )
 
     elif command == "dashboard":
-        subprocess.run(
-            ["streamlit", "run", "dashboard/app.py", "--server.port", "8501"]
-        )
+        subprocess.run(["streamlit", "run", "dashboard/app.py", "--server.port", "8501"])
 
     elif command == "all":
         print("Run in separate terminals:")
