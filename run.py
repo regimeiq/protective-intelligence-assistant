@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 from database.init_db import (
+    get_connection,
     init_db,
     migrate_schema,
     purge_raw_content,
@@ -38,12 +39,27 @@ def main():
     if command == "init":
         init_db()
         migrate_schema()
-        seed_default_sources()
-        seed_default_keywords()
-        seed_default_pois()
-        seed_default_protected_locations()
-        seed_default_events()
-        seed_threat_actors()
+        conn = get_connection()
+        source_count = conn.execute("SELECT COUNT(*) AS count FROM sources").fetchone()["count"]
+        keyword_count = conn.execute("SELECT COUNT(*) AS count FROM keywords").fetchone()["count"]
+        actor_count = conn.execute("SELECT COUNT(*) AS count FROM threat_actors").fetchone()["count"]
+        poi_count = conn.execute("SELECT COUNT(*) AS count FROM pois").fetchone()["count"]
+        loc_count = conn.execute("SELECT COUNT(*) AS count FROM protected_locations").fetchone()["count"]
+        event_count = conn.execute("SELECT COUNT(*) AS count FROM events").fetchone()["count"]
+        conn.close()
+
+        if source_count == 0:
+            seed_default_sources()
+        if keyword_count == 0:
+            seed_default_keywords()
+        if poi_count == 0:
+            seed_default_pois()
+        if loc_count == 0:
+            seed_default_protected_locations()
+        if event_count == 0:
+            seed_default_events()
+        if actor_count == 0:
+            seed_threat_actors()
 
     elif command == "scrape":
         init_db()

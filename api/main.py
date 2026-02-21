@@ -148,7 +148,7 @@ def root():
 # --- ALERTS ---
 
 
-@app.get("/alerts")
+@app.get("/alerts", dependencies=[Depends(verify_api_key)])
 def get_alerts(
     severity: Optional[str] = None,
     reviewed: Optional[int] = None,
@@ -187,7 +187,7 @@ def get_alerts(
     return [dict(a) for a in alerts]
 
 
-@app.get("/alerts/summary")
+@app.get("/alerts/summary", dependencies=[Depends(verify_api_key)])
 def get_alerts_summary():
     conn = get_connection()
     total = conn.execute("SELECT COUNT(*) as count FROM alerts").fetchone()["count"]
@@ -305,7 +305,7 @@ def classify_alert(alert_id: int, body: ClassifyRequest):
     }
 
 
-@app.get("/alerts/{alert_id}/score")
+@app.get("/alerts/{alert_id}/score", dependencies=[Depends(verify_api_key)])
 def get_alert_score(
     alert_id: int,
     uncertainty: int = Query(default=0, ge=0, le=1),
@@ -362,7 +362,7 @@ def get_alert_score(
     return payload
 
 
-@app.get("/alerts/{alert_id}/entities")
+@app.get("/alerts/{alert_id}/entities", dependencies=[Depends(verify_api_key)])
 def get_alert_entities(alert_id: int):
     conn = get_connection()
     alert = conn.execute("SELECT id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -381,7 +381,7 @@ def get_alert_entities(alert_id: int):
     return [dict(entity) for entity in entities]
 
 
-@app.get("/alerts/{alert_id}/iocs")
+@app.get("/alerts/{alert_id}/iocs", dependencies=[Depends(verify_api_key)])
 def get_alert_iocs(alert_id: int):
     conn = get_connection()
     alert = conn.execute("SELECT id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -415,7 +415,7 @@ def trigger_rescore():
 # --- INTELLIGENCE REPORTS ---
 
 
-@app.get("/intelligence/daily")
+@app.get("/intelligence/daily", dependencies=[Depends(verify_api_key)])
 def get_daily_report(date: Optional[str] = None):
     """Generate or retrieve the intelligence report for a given date."""
     from analytics.intelligence_report import generate_daily_report
@@ -432,7 +432,7 @@ def get_daily_report(date: Optional[str] = None):
     return report
 
 
-@app.get("/intelligence/reports")
+@app.get("/intelligence/reports", dependencies=[Depends(verify_api_key)])
 def list_reports(limit: int = Query(default=7, le=30)):
     """List recent intelligence reports."""
     conn = get_connection()
@@ -446,7 +446,7 @@ def list_reports(limit: int = Query(default=7, le=30)):
     return [dict(r) for r in reports]
 
 
-@app.get("/intelligence/reports/{report_date}")
+@app.get("/intelligence/reports/{report_date}", dependencies=[Depends(verify_api_key)])
 def get_report(report_date: str):
     """Retrieve a specific day's intelligence report."""
     conn = get_connection()
@@ -474,7 +474,7 @@ def get_report(report_date: str):
 # --- ANALYTICS ---
 
 
-@app.get("/analytics/spikes")
+@app.get("/analytics/spikes", dependencies=[Depends(verify_api_key)])
 def get_spikes(
     threshold: float = Query(default=2.0, ge=1.0),
     date: Optional[str] = Query(default=None),
@@ -493,7 +493,7 @@ def get_spikes(
     return detect_spikes(threshold=threshold, as_of_date=date)
 
 
-@app.get("/analytics/keyword-trend/{keyword_id}")
+@app.get("/analytics/keyword-trend/{keyword_id}", dependencies=[Depends(verify_api_key)])
 def get_keyword_trend_endpoint(keyword_id: int, days: int = Query(default=14, le=60)):
     """Get daily frequency trend for a specific keyword."""
     from analytics.spike_detection import get_keyword_trend
@@ -501,7 +501,7 @@ def get_keyword_trend_endpoint(keyword_id: int, days: int = Query(default=14, le
     return get_keyword_trend(keyword_id, days=days)
 
 
-@app.get("/analytics/forecast/keyword/{keyword_id}")
+@app.get("/analytics/forecast/keyword/{keyword_id}", dependencies=[Depends(verify_api_key)])
 def get_keyword_forecast(keyword_id: int, horizon: int = Query(default=7, ge=1, le=30)):
     """Forecast keyword frequency for the next N days."""
     from analytics.forecasting import forecast_keyword
@@ -509,7 +509,7 @@ def get_keyword_forecast(keyword_id: int, horizon: int = Query(default=7, ge=1, 
     return forecast_keyword(keyword_id=keyword_id, horizon=horizon)
 
 
-@app.get("/analytics/evaluation")
+@app.get("/analytics/evaluation", dependencies=[Depends(verify_api_key)])
 def get_evaluation_metrics(source_id: Optional[int] = None):
     """
     Compute and return precision/recall/F1 per source.
@@ -531,7 +531,7 @@ def get_evaluation_metrics(source_id: Optional[int] = None):
     return results
 
 
-@app.get("/analytics/performance")
+@app.get("/analytics/performance", dependencies=[Depends(verify_api_key)])
 def get_performance_metrics(limit: int = Query(default=20, le=100)):
     """Get recent scraping performance benchmarks."""
     conn = get_connection()
@@ -544,7 +544,7 @@ def get_performance_metrics(limit: int = Query(default=20, le=100)):
     return [dict(r) for r in runs]
 
 
-@app.get("/analytics/backtest")
+@app.get("/analytics/backtest", dependencies=[Depends(verify_api_key)])
 def run_backtest():
     """
     Run scoring model backtest against golden dataset of known incidents.
@@ -555,7 +555,7 @@ def run_backtest():
     return run_backtest()
 
 
-@app.get("/analytics/duplicates")
+@app.get("/analytics/duplicates", dependencies=[Depends(verify_api_key)])
 def get_duplicate_stats():
     """Get content deduplication statistics."""
     conn = get_connection()
@@ -585,7 +585,7 @@ def get_duplicate_stats():
     }
 
 
-@app.get("/analytics/graph")
+@app.get("/analytics/graph", dependencies=[Depends(verify_api_key)])
 def get_graph(
     days: int = Query(default=7, ge=1, le=30),
     min_score: float = Query(default=70.0, ge=0.0, le=100.0),
@@ -600,7 +600,7 @@ def get_graph(
 # --- PROTECTIVE INTEL ---
 
 
-@app.get("/pois")
+@app.get("/pois", dependencies=[Depends(verify_api_key)])
 def get_pois(active_only: int = Query(default=1, ge=0, le=1)):
     conn = get_connection()
     query = "SELECT * FROM pois"
@@ -658,7 +658,7 @@ def create_poi(body: POICreate):
     return payload
 
 
-@app.get("/pois/{poi_id}/hits")
+@app.get("/pois/{poi_id}/hits", dependencies=[Depends(verify_api_key)])
 def get_poi_hits(poi_id: int, days: int = Query(default=14, ge=1, le=90)):
     conn = get_connection()
     exists = conn.execute("SELECT id FROM pois WHERE id = ?", (poi_id,)).fetchone()
@@ -680,7 +680,7 @@ def get_poi_hits(poi_id: int, days: int = Query(default=14, ge=1, le=90)):
     return [dict(row) for row in rows]
 
 
-@app.get("/pois/{poi_id}/assessment")
+@app.get("/pois/{poi_id}/assessment", dependencies=[Depends(verify_api_key)])
 def get_poi_assessment(
     poi_id: int,
     window_days: int = Query(default=14, ge=7, le=30),
@@ -730,7 +730,7 @@ def get_poi_assessment(
     return assessment or {}
 
 
-@app.get("/locations/protected")
+@app.get("/locations/protected", dependencies=[Depends(verify_api_key)])
 def get_protected_locations(active_only: int = Query(default=1, ge=0, le=1)):
     conn = get_connection()
     query = "SELECT * FROM protected_locations"
@@ -742,7 +742,7 @@ def get_protected_locations(active_only: int = Query(default=1, ge=0, le=1)):
     return [dict(row) for row in rows]
 
 
-@app.get("/locations/protected/{location_id}/alerts")
+@app.get("/locations/protected/{location_id}/alerts", dependencies=[Depends(verify_api_key)])
 def get_protected_location_alerts(
     location_id: int,
     days: int = Query(default=7, ge=1, le=30),
@@ -796,7 +796,7 @@ def create_protected_location(body: ProtectedLocationCreate):
     return dict(row)
 
 
-@app.get("/analytics/map")
+@app.get("/analytics/map", dependencies=[Depends(verify_api_key)])
 def get_map_points(days: int = Query(default=7, ge=1, le=30), min_ors: float = Query(default=60.0)):
     conn = get_connection()
     protected = conn.execute(
@@ -836,7 +836,7 @@ def create_travel_brief(body: TravelBriefRequest):
     )
 
 
-@app.get("/briefs/travel")
+@app.get("/briefs/travel", dependencies=[Depends(verify_api_key)])
 def list_travel_briefs(limit: int = Query(default=20, ge=1, le=100)):
     conn = get_connection()
     rows = conn.execute(
@@ -873,7 +873,7 @@ def create_disposition(alert_id: int, body: DispositionRequest):
 # --- KEYWORDS ---
 
 
-@app.get("/keywords")
+@app.get("/keywords", dependencies=[Depends(verify_api_key)])
 def get_keywords():
     conn = get_connection()
     keywords = conn.execute("SELECT * FROM keywords ORDER BY category, term").fetchall()
@@ -929,7 +929,7 @@ def update_keyword_weight(keyword_id: int, weight: float = Query(ge=0.1, le=5.0)
 # --- SOURCES ---
 
 
-@app.get("/sources")
+@app.get("/sources", dependencies=[Depends(verify_api_key)])
 def get_sources():
     conn = get_connection()
     sources = conn.execute("SELECT * FROM sources ORDER BY source_type, name").fetchall()
@@ -956,7 +956,7 @@ def update_source_credibility(source_id: int, credibility_score: float = Query(g
 # --- THREAT ACTORS ---
 
 
-@app.get("/threat-actors")
+@app.get("/threat-actors", dependencies=[Depends(verify_api_key)])
 def get_threat_actors():
     conn = get_connection()
     actors = conn.execute("SELECT * FROM threat_actors ORDER BY name").fetchall()
@@ -988,7 +988,7 @@ class ThreatSubjectAssessmentCreate(BaseModel):
     analyst_notes: Optional[str] = None
 
 
-@app.get("/threat-subjects")
+@app.get("/threat-subjects", dependencies=[Depends(verify_api_key)])
 def get_threat_subjects(
     status: Optional[str] = Query(default=None),
     min_score: float = Query(default=0.0, ge=0.0, le=100.0),
@@ -1043,7 +1043,7 @@ def create_threat_subject(body: ThreatSubjectCreate):
     return dict(row)
 
 
-@app.get("/threat-subjects/{subject_id}")
+@app.get("/threat-subjects/{subject_id}", dependencies=[Depends(verify_api_key)])
 def get_threat_subject(subject_id: int):
     """Get a single threat subject with assessment history."""
     from analytics.behavioral_assessment import get_subject_history
@@ -1102,7 +1102,7 @@ def assess_threat_subject(subject_id: int, body: ThreatSubjectAssessmentCreate):
     return result
 
 
-@app.get("/threat-subjects/{subject_id}/history")
+@app.get("/threat-subjects/{subject_id}/history", dependencies=[Depends(verify_api_key)])
 def get_threat_subject_history(
     subject_id: int,
     limit: int = Query(default=20, ge=1, le=100),
@@ -1127,7 +1127,7 @@ def get_threat_subject_history(
 # --- SITREPs ---
 
 
-@app.get("/sitreps")
+@app.get("/sitreps", dependencies=[Depends(verify_api_key)])
 def get_sitreps(
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
@@ -1141,7 +1141,7 @@ def get_sitreps(
     return results
 
 
-@app.get("/sitreps/{sitrep_id}")
+@app.get("/sitreps/{sitrep_id}", dependencies=[Depends(verify_api_key)])
 def get_sitrep(sitrep_id: int):
     """Get a single SITREP by ID."""
     conn = get_connection()
@@ -1240,7 +1240,7 @@ def trigger_social_media_scrape():
     return result
 
 
-@app.get("/analytics/escalation-tiers")
+@app.get("/analytics/escalation-tiers", dependencies=[Depends(verify_api_key)])
 def get_escalation_tiers():
     """Return the configured escalation tier thresholds."""
     from database.init_db import load_watchlist_yaml

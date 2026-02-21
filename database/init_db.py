@@ -217,6 +217,27 @@ def _compact_legacy_poi_assessments(conn):
     return len(delete_ids)
 
 
+def _ensure_schema_migrations_table(conn):
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
+
+
+def _has_schema_migration(conn, name):
+    row = conn.execute("SELECT 1 FROM schema_migrations WHERE name = ?", (name,)).fetchone()
+    return row is not None
+
+
+def _mark_schema_migration(conn, name):
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, CURRENT_TIMESTAMP)",
+        (name,),
+    )
+
+
 def migrate_schema():
     """Add new columns to existing tables. Safe to run multiple times."""
     conn = get_connection()
@@ -448,15 +469,19 @@ def migrate_schema():
         """
     )
 
-    compacted_rows = _compact_legacy_poi_assessments(conn)
-    if compacted_rows > 0:
-        try:
-            conn.execute(
-                "INSERT INTO retention_log (action, rows_affected) VALUES (?, ?)",
-                ("compact_poi_assessments", int(compacted_rows)),
-            )
-        except sqlite3.OperationalError:
-            pass
+    _ensure_schema_migrations_table(conn)
+    migration_name = "compact_poi_assessments_v1"
+    if not _has_schema_migration(conn, migration_name):
+        compacted_rows = _compact_legacy_poi_assessments(conn)
+        if compacted_rows > 0:
+            try:
+                conn.execute(
+                    "INSERT INTO retention_log (action, rows_affected) VALUES (?, ?)",
+                    ("compact_poi_assessments", int(compacted_rows)),
+                )
+            except sqlite3.OperationalError:
+                pass
+        _mark_schema_migration(conn, migration_name)
 
     # Standardize on flat alert_entities storage; remove legacy normalized tables.
     for sql in (

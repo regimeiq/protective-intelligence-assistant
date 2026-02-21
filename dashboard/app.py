@@ -7,6 +7,7 @@ import requests
 import streamlit as st
 
 API_URL = os.getenv("OSINT_API_URL", "http://localhost:8000").rstrip("/")
+API_KEY = os.getenv("OSINT_API_KEY", "").strip()
 
 st.set_page_config(
     page_title="Protective Intelligence Assistant",
@@ -16,8 +17,14 @@ st.set_page_config(
 
 st.title("🛡️ Protective Intelligence / Executive Protection Assistant")
 
+def _auth_headers():
+    if not API_KEY:
+        return {}
+    return {"X-API-Key": API_KEY}
+
+
 try:
-    requests.get(f"{API_URL}/", timeout=3).raise_for_status()
+    requests.get(f"{API_URL}/", headers=_auth_headers(), timeout=3).raise_for_status()
 except Exception:
     st.error("Cannot connect to API. Start `python run.py api` first.")
     st.stop()
@@ -45,7 +52,28 @@ except Exception:
 
 def _safe_get(path, params=None):
     try:
-        return requests.get(f"{API_URL}{path}", params=params, timeout=20).json()
+        response = requests.get(
+            f"{API_URL}{path}",
+            params=params,
+            headers=_auth_headers(),
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
+def _safe_post(path, payload, timeout=30):
+    try:
+        response = requests.post(
+            f"{API_URL}{path}",
+            json=payload,
+            headers=_auth_headers(),
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()
     except Exception:
         return None
 
@@ -213,12 +241,12 @@ with tab_travel:
             "start_dt": start_dt.strftime("%Y-%m-%d"),
             "end_dt": end_dt.strftime("%Y-%m-%d"),
         }
-        try:
-            brief = requests.post(f"{API_URL}/briefs/travel", json=payload, timeout=30).json()
+        brief = _safe_post("/briefs/travel", payload, timeout=30)
+        if brief:
             st.markdown("### Brief Output")
             st.markdown(brief.get("content_md", "No brief generated."))
-        except Exception as exc:
-            st.error(f"Brief generation failed: {exc}")
+        else:
+            st.error("Brief generation failed. Verify API auth and connectivity.")
 
     st.markdown("### Recent Briefs")
     briefs = _safe_get("/briefs/travel", params={"limit": 10}) or []
