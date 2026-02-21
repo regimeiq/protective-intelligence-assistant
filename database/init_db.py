@@ -388,6 +388,63 @@ def migrate_schema():
             content_md TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS threat_subjects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            aliases TEXT DEFAULT '[]',
+            linked_poi_id INTEGER,
+            first_seen TEXT,
+            last_seen TEXT,
+            status TEXT DEFAULT 'active',
+            risk_tier TEXT DEFAULT 'LOW',
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (linked_poi_id) REFERENCES pois(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS threat_subject_assessments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_id INTEGER NOT NULL,
+            assessment_date TEXT NOT NULL,
+            grievance_level REAL DEFAULT 0.0,
+            fixation_level REAL DEFAULT 0.0,
+            identification_level REAL DEFAULT 0.0,
+            novel_aggression REAL DEFAULT 0.0,
+            energy_burst REAL DEFAULT 0.0,
+            leakage REAL DEFAULT 0.0,
+            last_resort REAL DEFAULT 0.0,
+            directly_communicated_threat REAL DEFAULT 0.0,
+            pathway_score REAL DEFAULT 0.0,
+            escalation_trend TEXT DEFAULT 'stable',
+            evidence_summary TEXT,
+            source_alert_ids TEXT DEFAULT '[]',
+            analyst_notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(subject_id, assessment_date),
+            FOREIGN KEY (subject_id) REFERENCES threat_subjects(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS sitreps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger_type TEXT NOT NULL,
+            trigger_alert_id INTEGER,
+            trigger_poi_id INTEGER,
+            trigger_location_id INTEGER,
+            severity TEXT NOT NULL,
+            title TEXT NOT NULL,
+            situation_summary TEXT,
+            threat_assessment TEXT,
+            affected_protectees TEXT DEFAULT '[]',
+            affected_locations TEXT DEFAULT '[]',
+            recommended_actions TEXT DEFAULT '[]',
+            escalation_tier TEXT,
+            escalation_notify TEXT DEFAULT '[]',
+            content_md TEXT,
+            status TEXT DEFAULT 'draft',
+            issued_at TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (trigger_alert_id) REFERENCES alerts(id) ON DELETE SET NULL,
+            FOREIGN KEY (trigger_poi_id) REFERENCES pois(id) ON DELETE SET NULL,
+            FOREIGN KEY (trigger_location_id) REFERENCES protected_locations(id) ON DELETE SET NULL
+        );
         """
     )
 
@@ -428,6 +485,11 @@ def migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_alert_proximity_alert ON alert_proximity(alert_id)",
         "CREATE INDEX IF NOT EXISTS idx_events_start_dt ON events(start_dt)",
         "CREATE INDEX IF NOT EXISTS idx_poi_assessments_poi_window ON poi_assessments(poi_id, window_start, window_end)",
+        "CREATE INDEX IF NOT EXISTS idx_threat_subjects_status ON threat_subjects(status)",
+        "CREATE INDEX IF NOT EXISTS idx_tsa_subject_date ON threat_subject_assessments(subject_id, assessment_date)",
+        "CREATE INDEX IF NOT EXISTS idx_sitreps_status ON sitreps(status)",
+        "CREATE INDEX IF NOT EXISTS idx_sitreps_created ON sitreps(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_sitreps_trigger_poi ON sitreps(trigger_poi_id)",
     ]
     for sql in indexes:
         try:
@@ -501,6 +563,7 @@ def load_watchlist_yaml(config_path=None):
         "pois": [],
         "protected_locations": [],
         "events": [],
+        "escalation_tiers": [],
     }
 
     source_block = payload.get("sources", {})
@@ -649,6 +712,33 @@ def load_watchlist_yaml(config_path=None):
                     "notes": str(item.get("notes", "")).strip() or None,
                 }
             )
+
+    escalation_tiers = payload.get("escalation_tiers", [])
+    if isinstance(escalation_tiers, list):
+        for tier in escalation_tiers:
+            if not isinstance(tier, dict):
+                continue
+            label = str(tier.get("label", "")).strip()
+            if not label:
+                continue
+            try:
+                threshold = float(tier.get("threshold", 0))
+            except (TypeError, ValueError):
+                threshold = 0.0
+            notify = tier.get("notify", [])
+            if not isinstance(notify, list):
+                notify = []
+            parsed["escalation_tiers"].append(
+                {
+                    "threshold": threshold,
+                    "label": label,
+                    "notify": [str(n).strip() for n in notify if str(n).strip()],
+                    "action": str(tier.get("action", "")).strip() or None,
+                    "response_window": str(tier.get("response_window", "")).strip() or None,
+                }
+            )
+        # Sort tiers by threshold descending so highest priority comes first.
+        parsed["escalation_tiers"].sort(key=lambda t: t["threshold"], reverse=True)
 
     return parsed
 

@@ -170,3 +170,25 @@ sources:
   pastebin:
     - name: "Pastebin Archive"
       url: "https://pastebin.com/archive"
+
+escalation_tiers:
+  - threshold: 85
+    label: "CRITICAL"
+    notify: ["detail_leader", "intel_manager"]
+    action: "Immediate briefing required. Detail leader notified."
+    response_window: "30 minutes"
+  - threshold: 65
+    label: "ELEVATED"
+    notify: ["intel_analyst"]
+    action: "Enhanced monitoring. Assess within 4 hours."
+    response_window: "4 hours"
+  - threshold: 40
+    label: "ROUTINE"
+    notify: []
+    action: "Log and monitor. Include in next daily report."
+    response_window: "24 hours"
+  - threshold: 0
+    label: "LOW"
+    notify: []
+    action: "No immediate action. Archive for trend analysis."
+    response_window: "N/A"

@@ -5,8 +5,11 @@ import re
 from collections import defaultdict
 from datetime import timedelta
 
+import yaml
+
 from analytics.uncertainty import beta_adjusted_interval
 from analytics.utils import utcnow
+from database.init_db import WATCHLIST_CONFIG_PATH
 
 LEAKAGE_PATTERNS = [
     re.compile(r"\b(i\s+will|we\s+will|going\s+to|plan\s+to|intend\s+to)\b", re.IGNORECASE),
@@ -171,6 +174,106 @@ def compute_poi_assessment(conn, poi_id, window_days=14, n=500):
         "tas_score": tas_score,
         "evidence": evidence,
     }
+
+
+FLAG_DESCRIPTIONS = {
+    "fixation": "Persistent, recurring attention to the protectee across multiple days — indicates obsessive focus.",
+    "energy_burst": "Sudden spike in mention frequency (z ≥ 2.0 vs 7-day baseline) — suggests escalating urgency.",
+    "leakage": "Language signaling intent or timeline (e.g., 'tomorrow', 'plan to', 'going to') — pre-attack indicator.",
+    "pathway": "References to operational details (routes, entrances, schedules, weapons) — preparation behavior.",
+    "targeting_specificity": "Combination of location data + time references — indicates specific targeting window.",
+}
+
+
+def _load_escalation_tiers():
+    """Load escalation tier config from watchlist.yaml."""
+    try:
+        with open(WATCHLIST_CONFIG_PATH, "r") as fh:
+            config = yaml.safe_load(fh) or {}
+        return config.get("escalation_tiers", [])
+    except Exception:
+        return [
+            {"threshold": 85, "label": "CRITICAL", "notify": ["detail_leader", "intel_manager"],
+             "action": "Immediate briefing required.", "response_window": "30 minutes"},
+            {"threshold": 65, "label": "ELEVATED", "notify": ["intel_analyst"],
+             "action": "Enhanced monitoring. Assess within 4 hours.", "response_window": "4 hours"},
+            {"threshold": 40, "label": "ROUTINE", "notify": [],
+             "action": "Log and monitor.", "response_window": "24 hours"},
+            {"threshold": 0, "label": "LOW", "notify": [],
+             "action": "No immediate action.", "response_window": "N/A"},
+        ]
+
+
+def _resolve_escalation_tier(score):
+    """Map a TAS score to the appropriate escalation tier."""
+    tiers = _load_escalation_tiers()
+    if not tiers:
+        return {"label": "ROUTINE", "notify": [], "action": "Monitor.", "response_window": "24 hours"}
+    tiers_sorted = sorted(tiers, key=lambda t: t.get("threshold", 0), reverse=True)
+    for tier in tiers_sorted:
+        if score >= tier.get("threshold", 0):
+            return tier
+    return tiers_sorted[-1] if tiers_sorted else {"label": "LOW", "notify": [], "action": "Archive."}
+
+
+def build_escalation_explanation(assessment):
+    """Build an 'Escalate because...' block from a TAS assessment.
+
+    Returns a dict with:
+      - escalation_tier (CRITICAL/ELEVATED/ROUTINE/LOW)
+      - flags_fired: list of {name, description} for each active TRAP-lite flag
+      - evidence_strings: up to 3 text excerpts that informed the assessment
+      - recommended_action: what the analyst should do
+      - response_window: SLA for the tier
+      - notify: list of roles to notify
+    """
+    tas_score = float(assessment.get("tas_score", 0.0))
+    tier = _resolve_escalation_tier(tas_score)
+
+    flags_fired = []
+    for flag_name, description in FLAG_DESCRIPTIONS.items():
+        if int(assessment.get(flag_name, 0)) == 1:
+            flags_fired.append({"flag": flag_name, "description": description})
+
+    evidence = assessment.get("evidence") or {}
+    excerpts = evidence.get("excerpts", [])
+
+    actions = [tier.get("action", "Monitor.")]
+    if tas_score >= 65:
+        actions.append("Review all POI hits for the assessment window.")
+        actions.append("Verify protectee's current location and upcoming movements.")
+    if tas_score >= 85:
+        actions.insert(0, "IMMEDIATE: Brief detail leader and intel manager.")
+        actions.append("Consider enhanced protective posture.")
+
+    return {
+        "escalation_tier": tier.get("label", "ROUTINE"),
+        "flags_fired": flags_fired,
+        "evidence_strings": excerpts[:3],
+        "recommended_actions": actions,
+        "response_window": tier.get("response_window", "N/A"),
+        "notify": tier.get("notify", []),
+        "summary": _build_escalation_summary(tas_score, flags_fired, evidence, tier),
+    }
+
+
+def _build_escalation_summary(tas_score, flags_fired, evidence, tier):
+    """One-paragraph human-readable escalation summary."""
+    if not flags_fired:
+        return f"TAS {tas_score:.1f} — No TRAP-lite flags active. {tier.get('action', 'Monitor.')}."
+
+    flag_names = [f["flag"].replace("_", " ") for f in flags_fired]
+    hit_count = evidence.get("hits", 0)
+    day_count = evidence.get("distinct_days", 0)
+
+    summary = (
+        f"Escalate: TAS {tas_score:.1f} ({tier.get('label', 'ROUTINE')}). "
+        f"TRAP-lite flags: {', '.join(flag_names)}. "
+        f"{hit_count} hit(s) across {day_count} day(s). "
+    )
+    if tier.get("response_window"):
+        summary += f"Response window: {tier['response_window']}."
+    return summary
 
 
 def update_alert_tas(conn, alert_id):

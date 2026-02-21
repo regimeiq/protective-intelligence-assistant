@@ -20,6 +20,9 @@ def client(tmp_path, monkeypatch):
     db_init.migrate_schema()
     db_init.seed_default_sources()
     db_init.seed_default_keywords()
+    db_init.seed_default_pois()
+    db_init.seed_default_protected_locations()
+    db_init.seed_default_events()
     db_init.seed_threat_actors()
 
     with TestClient(app, raise_server_exceptions=False) as test_client:

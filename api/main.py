@@ -46,8 +46,8 @@ async def verify_api_key(api_key: Optional[str] = Security(_api_key_header)):
 
 app = FastAPI(
     title="Protective Intelligence Assistant API",
-    description="EP-focused REST API for protectee/facility/travel triage with ORS/TAS scoring and explainable uncertainty.",
-    version="4.0.0",
+    description="EP-focused REST API: protectee/facility/travel triage, ORS/TAS scoring, behavioral threat assessment, SITREPs, and explainable uncertainty.",
+    version="5.0.0",
 )
 
 
@@ -142,7 +142,7 @@ def startup():
 
 @app.get("/")
 def root():
-    return {"status": "online", "service": "Protective Intelligence Assistant", "version": "4.0.0"}
+    return {"status": "online", "service": "Protective Intelligence Assistant", "version": "5.0.0"}
 
 
 # --- ALERTS ---
@@ -686,7 +686,13 @@ def get_poi_assessment(
     window_days: int = Query(default=14, ge=7, le=30),
     force: int = Query(default=0, ge=0, le=1),
 ):
-    from analytics.tas_assessment import compute_poi_assessment
+    """Get the TAS (Threat Assessment Score) for a protectee.
+
+    Returns TRAP-lite flags, evidence, uncertainty interval, and an
+    ``escalation`` block explaining *why* to escalate, which flags fired,
+    evidence strings, recommended analyst actions, and notification tier.
+    """
+    from analytics.tas_assessment import build_escalation_explanation, compute_poi_assessment
 
     conn = get_connection()
     exists = conn.execute("SELECT id FROM pois WHERE id = ?", (poi_id,)).fetchone()
@@ -698,6 +704,8 @@ def get_poi_assessment(
         assessment = compute_poi_assessment(conn, poi_id, window_days=window_days)
         conn.commit()
         conn.close()
+        if assessment:
+            assessment["escalation"] = build_escalation_explanation(assessment)
         return assessment or {}
 
     row = conn.execute(
@@ -710,12 +718,15 @@ def get_poi_assessment(
     if row:
         payload = dict(row)
         payload["evidence"] = json.loads(payload.get("evidence_json") or "{}")
+        payload["escalation"] = build_escalation_explanation(payload)
         conn.close()
         return payload
 
     assessment = compute_poi_assessment(conn, poi_id, window_days=window_days)
     conn.commit()
     conn.close()
+    if assessment:
+        assessment["escalation"] = build_escalation_explanation(assessment)
     return assessment or {}
 
 
@@ -951,3 +962,302 @@ def get_threat_actors():
     actors = conn.execute("SELECT * FROM threat_actors ORDER BY name").fetchall()
     conn.close()
     return [dict(a) for a in actors]
+
+
+# --- THREAT SUBJECTS (Behavioral Assessment) ---
+
+
+class ThreatSubjectCreate(BaseModel):
+    name: str
+    aliases: list[str] = []
+    linked_poi_id: Optional[int] = None
+    notes: Optional[str] = None
+
+
+class ThreatSubjectAssessmentCreate(BaseModel):
+    grievance_level: float = 0.0
+    fixation_level: float = 0.0
+    identification_level: float = 0.0
+    novel_aggression: float = 0.0
+    energy_burst: float = 0.0
+    leakage: float = 0.0
+    last_resort: float = 0.0
+    directly_communicated_threat: float = 0.0
+    evidence_summary: Optional[str] = None
+    source_alert_ids: list[int] = []
+    analyst_notes: Optional[str] = None
+
+
+@app.get("/threat-subjects")
+def get_threat_subjects(
+    status: Optional[str] = Query(default=None),
+    min_score: float = Query(default=0.0, ge=0.0, le=100.0),
+):
+    """List all threat subjects with their latest pathway score."""
+    from analytics.behavioral_assessment import get_active_subjects
+
+    conn = get_connection()
+    if status and status != "active":
+        # get_active_subjects only returns active; for other statuses, query directly
+        rows = conn.execute(
+            "SELECT * FROM threat_subjects WHERE status = ? ORDER BY name",
+            (status,),
+        ).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    subjects = get_active_subjects(conn, min_score=min_score)
+    conn.close()
+    return subjects
+
+
+@app.post("/threat-subjects", dependencies=[Depends(verify_api_key)])
+def create_threat_subject(body: ThreatSubjectCreate):
+    """Register a new threat subject for behavioral tracking."""
+    conn = get_connection()
+
+    if body.linked_poi_id is not None:
+        poi = conn.execute("SELECT id FROM pois WHERE id = ?", (body.linked_poi_id,)).fetchone()
+        if not poi:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Linked POI not found")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        """INSERT INTO threat_subjects
+        (name, aliases, linked_poi_id, first_seen, last_seen, status, risk_tier, notes)
+        VALUES (?, ?, ?, ?, ?, 'active', 'LOW', ?)""",
+        (
+            body.name.strip(),
+            json.dumps([a.strip() for a in body.aliases if a.strip()]),
+            body.linked_poi_id,
+            now,
+            now,
+            body.notes,
+        ),
+    )
+    subject_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    row = conn.execute("SELECT * FROM threat_subjects WHERE id = ?", (subject_id,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+@app.get("/threat-subjects/{subject_id}")
+def get_threat_subject(subject_id: int):
+    """Get a single threat subject with assessment history."""
+    from analytics.behavioral_assessment import get_subject_history
+
+    conn = get_connection()
+    subject = conn.execute(
+        "SELECT * FROM threat_subjects WHERE id = ?",
+        (subject_id,),
+    ).fetchone()
+    if not subject:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Threat subject not found")
+
+    history = get_subject_history(conn, subject_id, limit=10)
+    conn.close()
+    result = dict(subject)
+    result["assessment_history"] = history
+    return result
+
+
+@app.post("/threat-subjects/{subject_id}/assess", dependencies=[Depends(verify_api_key)])
+def assess_threat_subject(subject_id: int, body: ThreatSubjectAssessmentCreate):
+    """Submit a behavioral assessment for a threat subject."""
+    from analytics.behavioral_assessment import upsert_assessment
+
+    conn = get_connection()
+    subject = conn.execute(
+        "SELECT id FROM threat_subjects WHERE id = ?",
+        (subject_id,),
+    ).fetchone()
+    if not subject:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Threat subject not found")
+
+    indicators = {
+        "grievance_level": body.grievance_level,
+        "fixation_level": body.fixation_level,
+        "identification_level": body.identification_level,
+        "novel_aggression": body.novel_aggression,
+        "energy_burst": body.energy_burst,
+        "leakage": body.leakage,
+        "last_resort": body.last_resort,
+        "directly_communicated_threat": body.directly_communicated_threat,
+    }
+
+    result = upsert_assessment(
+        conn,
+        subject_id,
+        indicators,
+        evidence_summary=body.evidence_summary,
+        source_alert_ids=body.source_alert_ids,
+        analyst_notes=body.analyst_notes,
+    )
+    conn.commit()
+    conn.close()
+    return result
+
+
+@app.get("/threat-subjects/{subject_id}/history")
+def get_threat_subject_history(
+    subject_id: int,
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """Get longitudinal assessment history for a threat subject."""
+    from analytics.behavioral_assessment import get_subject_history
+
+    conn = get_connection()
+    subject = conn.execute(
+        "SELECT id FROM threat_subjects WHERE id = ?",
+        (subject_id,),
+    ).fetchone()
+    if not subject:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Threat subject not found")
+
+    history = get_subject_history(conn, subject_id, limit=limit)
+    conn.close()
+    return history
+
+
+# --- SITREPs ---
+
+
+@app.get("/sitreps")
+def get_sitreps(
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """List recent SITREPs."""
+    from analytics.sitrep import list_sitreps
+
+    conn = get_connection()
+    results = list_sitreps(conn, status=status, limit=limit)
+    conn.close()
+    return results
+
+
+@app.get("/sitreps/{sitrep_id}")
+def get_sitrep(sitrep_id: int):
+    """Get a single SITREP by ID."""
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM sitreps WHERE id = ?", (sitrep_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="SITREP not found")
+    result = dict(row)
+    for field in ("affected_protectees", "affected_locations", "recommended_actions", "escalation_notify"):
+        if result.get(field):
+            try:
+                result[field] = json.loads(result[field])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return result
+
+
+@app.post("/sitreps/generate/poi/{poi_id}", dependencies=[Depends(verify_api_key)])
+def generate_poi_sitrep(poi_id: int):
+    """Generate a SITREP for a POI based on their current assessment."""
+    from analytics.sitrep import generate_sitrep_for_poi_escalation
+    from analytics.tas_assessment import compute_poi_assessment
+
+    conn = get_connection()
+    poi = conn.execute("SELECT id FROM pois WHERE id = ?", (poi_id,)).fetchone()
+    if not poi:
+        conn.close()
+        raise HTTPException(status_code=404, detail="POI not found")
+
+    assessment = compute_poi_assessment(conn, poi_id, window_days=14)
+    if not assessment:
+        conn.close()
+        raise HTTPException(status_code=404, detail="No assessment data available for this POI")
+
+    sitrep = generate_sitrep_for_poi_escalation(conn, poi_id, assessment)
+    conn.commit()
+    conn.close()
+    if not sitrep:
+        raise HTTPException(status_code=500, detail="Failed to generate SITREP")
+    return sitrep
+
+
+@app.post("/sitreps/generate/facility/{location_id}/alert/{alert_id}", dependencies=[Depends(verify_api_key)])
+def generate_facility_sitrep(location_id: int, alert_id: int):
+    """Generate a SITREP for a facility breach event."""
+    from analytics.sitrep import generate_sitrep_for_facility_breach
+
+    conn = get_connection()
+    location = conn.execute(
+        "SELECT id FROM protected_locations WHERE id = ?",
+        (location_id,),
+    ).fetchone()
+    if not location:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Protected location not found")
+
+    alert = conn.execute("SELECT id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+    if not alert:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    sitrep = generate_sitrep_for_facility_breach(conn, alert_id, location_id)
+    conn.commit()
+    conn.close()
+    if not sitrep:
+        raise HTTPException(status_code=500, detail="Failed to generate SITREP")
+    return sitrep
+
+
+@app.patch("/sitreps/{sitrep_id}/issue", dependencies=[Depends(verify_api_key)])
+def issue_sitrep_endpoint(sitrep_id: int):
+    """Mark a SITREP as issued (distributed up the chain)."""
+    from analytics.sitrep import issue_sitrep
+
+    conn = get_connection()
+    existing = conn.execute("SELECT id, status FROM sitreps WHERE id = ?", (sitrep_id,)).fetchone()
+    if not existing:
+        conn.close()
+        raise HTTPException(status_code=404, detail="SITREP not found")
+
+    row = issue_sitrep(conn, sitrep_id)
+    conn.commit()
+    conn.close()
+    return dict(row)
+
+
+# --- SOCIAL MEDIA MONITORING ---
+
+
+@app.post("/scrape/social-media", dependencies=[Depends(verify_api_key)])
+def trigger_social_media_scrape():
+    """Trigger a social media monitoring run (stub: loads fixture data in demo mode)."""
+    from scraper.social_media_monitor import run_social_media_monitor
+
+    result = run_social_media_monitor()
+    return result
+
+
+@app.get("/analytics/escalation-tiers")
+def get_escalation_tiers():
+    """Return the configured escalation tier thresholds."""
+    from database.init_db import load_watchlist_yaml
+
+    watchlist = load_watchlist_yaml()
+    if watchlist and watchlist.get("escalation_tiers"):
+        return {"tiers": watchlist["escalation_tiers"]}
+    # Hardcoded fallback
+    return {
+        "tiers": [
+            {"threshold": 85, "label": "CRITICAL", "notify": ["detail_leader", "intel_manager"],
+             "action": "Immediate briefing required.", "response_window": "30 minutes"},
+            {"threshold": 65, "label": "ELEVATED", "notify": ["intel_analyst"],
+             "action": "Enhanced monitoring. Assess within 4 hours.", "response_window": "4 hours"},
+            {"threshold": 40, "label": "ROUTINE", "notify": [],
+             "action": "Log and monitor.", "response_window": "24 hours"},
+            {"threshold": 0, "label": "LOW", "notify": [],
+             "action": "No immediate action.", "response_window": "N/A"},
+        ]
+    }
