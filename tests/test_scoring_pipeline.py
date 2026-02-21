@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+from analytics.utils import utcnow
 from analytics.risk_scoring import (
     build_frequency_snapshot,
     increment_keyword_frequency,
@@ -21,7 +22,7 @@ def _get_source_and_keyword_ids():
 def test_recency_prefers_published_timestamp(client):
     source_id, keyword_id = _get_source_and_keyword_ids()
     conn = get_connection()
-    old_published = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    old_published = (utcnow() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
     conn.execute(
         """INSERT INTO alerts
@@ -44,7 +45,7 @@ def test_recency_prefers_published_timestamp(client):
         alert_id,
         keyword_id,
         source_id,
-        created_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        created_at=utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         published_at=old_published,
         frequency_override=1.0,
         z_score_override=0.0,

@@ -3,9 +3,21 @@ Regex-only IOC extraction for alerts.
 
 Stores entities in alert_entities as:
   (alert_id, entity_type, entity_value, created_at)
+
+Hash disambiguation:
+  MD5 (32 hex), SHA1 (40 hex), and SHA256 (64 hex) patterns can match
+  normal hex strings such as UUIDs, Git SHAs, and session tokens.
+  We require that at least one digit AND at least one letter [a-f] are
+  present to reduce false positives (pure-numeric or monotonic hex is
+  unlikely to be a real hash IOC in threat-intel context).
 """
 
 import re
+
+# --- Compiled patterns ---
+# MD5/SHA1/SHA256: require mixed hex (at least one digit + one a-f letter)
+# to avoid matching UUIDs, git SHAs, session tokens, etc.
+_HEX_MIXED_LOOKAHEAD = r"(?=.*[0-9])(?=.*[a-fA-F])"
 
 IOC_PATTERNS = {
     "ipv4": re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"),
@@ -14,9 +26,9 @@ IOC_PATTERNS = {
     ),
     "url": re.compile(r"\bhttps?://[^\s<>'\")]+", re.IGNORECASE),
     "cve": re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE),
-    "md5": re.compile(r"\b[a-fA-F0-9]{32}\b"),
-    "sha1": re.compile(r"\b[a-fA-F0-9]{40}\b"),
-    "sha256": re.compile(r"\b[a-fA-F0-9]{64}\b"),
+    "md5": re.compile(r"\b" + _HEX_MIXED_LOOKAHEAD + r"[a-fA-F0-9]{32}\b"),
+    "sha1": re.compile(r"\b" + _HEX_MIXED_LOOKAHEAD + r"[a-fA-F0-9]{40}\b"),
+    "sha256": re.compile(r"\b" + _HEX_MIXED_LOOKAHEAD + r"[a-fA-F0-9]{64}\b"),
 }
 
 IOC_TYPES = tuple(IOC_PATTERNS.keys())

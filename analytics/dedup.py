@@ -68,9 +68,9 @@ def find_fuzzy_title_duplicate(conn, title, threshold=0.85, max_candidates=200):
     if not title:
         return None
 
-    from datetime import datetime
+    from analytics.utils import utcnow
 
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = utcnow().strftime("%Y-%m-%d")
     candidates = conn.execute(
         """SELECT id, title FROM alerts
         WHERE created_at >= ? AND duplicate_of IS NULL

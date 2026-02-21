@@ -1,7 +1,8 @@
 import math
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
+from analytics.utils import compute_recency_factor, parse_timestamp, utcnow
 from database.init_db import get_connection
 
 
@@ -19,37 +20,6 @@ def _percentile(sorted_values, q):
         return sorted_values[lower]
     weight = idx - lower
     return sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
-
-
-def _parse_timestamp(value):
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        raw = str(value).strip()
-        if not raw:
-            return None
-        try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-                try:
-                    dt = datetime.strptime(raw, fmt)
-                    break
-                except ValueError:
-                    dt = None
-            if dt is None:
-                return None
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
-
-
-def _compute_recency_factor(published_at=None, created_at=None):
-    event_dt = _parse_timestamp(published_at) or _parse_timestamp(created_at) or datetime.utcnow()
-    recency_hours = (datetime.utcnow() - event_dt).total_seconds() / 3600.0
-    return max(0.1, 1.0 - (recency_hours / 168.0))
 
 
 def score_distribution(
@@ -99,9 +69,21 @@ def score_distribution(
     }
 
 
-def compute_uncertainty_for_alert(alert_id, n=500, seed=0, force=False, cache_hours=6):
-    """Compute and cache uncertainty intervals in alert_score_intervals."""
+def compute_uncertainty_for_alert(alert_id, n=500, seed=None, force=False, cache_hours=6):
+    """Compute and cache uncertainty intervals in alert_score_intervals.
+
+    Args:
+        alert_id: The alert to compute uncertainty for.
+        n: Number of Monte Carlo samples.
+        seed: RNG seed. Defaults to ``alert_id`` so each alert gets a
+              unique-but-reproducible distribution.
+        force: Recompute even if a fresh cached result exists.
+        cache_hours: Cache TTL in hours.
+    """
     from analytics.risk_scoring import get_frequency_factor
+
+    if seed is None:
+        seed = alert_id
 
     conn = get_connection()
     try:
@@ -110,8 +92,8 @@ def compute_uncertainty_for_alert(alert_id, n=500, seed=0, force=False, cache_ho
             (alert_id,),
         ).fetchone()
         if cached and not force:
-            computed_dt = _parse_timestamp(cached["computed_at"])
-            is_fresh = computed_dt and (datetime.utcnow() - computed_dt) < timedelta(hours=cache_hours)
+            computed_dt = parse_timestamp(cached["computed_at"])
+            is_fresh = computed_dt and (utcnow() - computed_dt) < timedelta(hours=cache_hours)
             if is_fresh and int(cached["n"]) == int(n):
                 return dict(cached)
 
@@ -139,7 +121,7 @@ def compute_uncertainty_for_alert(alert_id, n=500, seed=0, force=False, cache_ho
             recency_factor = latest_score["recency_factor"]
         else:
             freq_factor, _ = get_frequency_factor(conn, row["keyword_id"])
-            recency_factor = _compute_recency_factor(
+            recency_factor, _ = compute_recency_factor(
                 published_at=row["published_at"],
                 created_at=row["created_at"],
             )
@@ -161,7 +143,7 @@ def compute_uncertainty_for_alert(alert_id, n=500, seed=0, force=False, cache_ho
             seed=seed,
         )
 
-        computed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        computed_at = utcnow().strftime("%Y-%m-%d %H:%M:%S")
         conn.execute(
             """INSERT INTO alert_score_intervals
             (alert_id, n, p05, p50, p95, mean, std, computed_at, method)

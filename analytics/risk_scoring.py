@@ -18,6 +18,8 @@ Severity derivation:
 
 from datetime import datetime, timedelta, timezone
 
+from analytics.utils import compute_recency_factor, parse_timestamp, utcnow
+
 
 def compute_risk_score(keyword_weight, source_credibility, frequency_factor, recency_hours):
     """
@@ -50,6 +52,20 @@ def score_to_severity(score):
     elif score >= 40:
         return "medium"
     return "low"
+
+
+def score_to_severity_with_uncertainty(point_score, interval_mean=None):
+    """Map score to severity, preferring the uncertainty interval mean when available.
+
+    When Monte Carlo intervals exist, severity is derived from the interval
+    mean rather than the point estimate.  This avoids oscillation near
+    severity boundaries (e.g. 89.9 vs 90.0).
+
+    Returns:
+        (severity, used_score) tuple.
+    """
+    used_score = interval_mean if interval_mean is not None else point_score
+    return score_to_severity(used_score), used_score
 
 
 def get_keyword_weight(conn, keyword_id):
@@ -93,14 +109,14 @@ def get_frequency_factor(conn, keyword_id):
     Returns:
         (frequency_factor, z_score) tuple
     """
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = utcnow().strftime("%Y-%m-%d")
     today_row = conn.execute(
         "SELECT count FROM keyword_frequency WHERE keyword_id = ? AND date = ?",
         (keyword_id, today),
     ).fetchone()
     today_count = today_row["count"] if today_row else 0
 
-    seven_days_ago = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+    seven_days_ago = (utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
     rows = conn.execute(
         """SELECT count FROM keyword_frequency
         WHERE keyword_id = ? AND date >= ? AND date < ?""",
@@ -148,7 +164,7 @@ def increment_keyword_frequency(conn, keyword_id, increment_by=1):
     """Increment today's frequency count for a keyword."""
     if increment_by <= 0:
         return
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = utcnow().strftime("%Y-%m-%d")
     conn.execute(
         """INSERT INTO keyword_frequency (keyword_id, date, count)
         VALUES (?, ?, ?)
@@ -156,38 +172,6 @@ def increment_keyword_frequency(conn, keyword_id, increment_by=1):
         DO UPDATE SET count = count + excluded.count""",
         (keyword_id, today, increment_by),
     )
-
-
-def _parse_timestamp(value):
-    """Parse supported timestamp formats into a naive UTC datetime."""
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        raw = str(value).strip()
-        if not raw:
-            return None
-        try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-                try:
-                    dt = datetime.strptime(raw, fmt)
-                    break
-                except ValueError:
-                    dt = None
-            if dt is None:
-                return None
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
-
-
-def _compute_recency_factor(published_at=None, created_at=None):
-    event_dt = _parse_timestamp(published_at) or _parse_timestamp(created_at) or datetime.utcnow()
-    recency_hours = (datetime.utcnow() - event_dt).total_seconds() / 3600.0
-    return max(0.1, 1.0 - (recency_hours / 168.0)), recency_hours
 
 
 def score_alert(
@@ -213,7 +197,7 @@ def score_alert(
     else:
         frequency_factor, z_score = get_frequency_factor(conn, keyword_id)
 
-    recency_factor, recency_hours = _compute_recency_factor(
+    recency_factor, recency_hours = compute_recency_factor(
         published_at=published_at, created_at=created_at
     )
 
@@ -241,18 +225,31 @@ def score_alert(
     return risk_score
 
 
-def rescore_all_alerts(conn):
+def rescore_all_alerts(conn, frequency_snapshot=None):
     """
     Re-score all unreviewed alerts with current weights, Bayesian credibility,
     and Z-score frequency factors.
+
+    Args:
+        conn: Database connection
+        frequency_snapshot: Optional pre-built {keyword_id: (factor, z_score)} dict.
+            If None, a snapshot is built once at the start to avoid redundant
+            per-alert frequency lookups (O(n) -> O(1) per alert).
+
     Returns count of alerts rescored.
     """
     alerts = conn.execute(
         """SELECT a.id, a.keyword_id, a.source_id, a.created_at, a.published_at
         FROM alerts a WHERE a.reviewed = 0"""
     ).fetchall()
+
+    if frequency_snapshot is None:
+        keyword_ids = list({alert["keyword_id"] for alert in alerts})
+        frequency_snapshot = build_frequency_snapshot(conn, keyword_ids=keyword_ids)
+
     count = 0
     for alert in alerts:
+        score_args = frequency_snapshot.get(alert["keyword_id"])
         score_alert(
             conn,
             alert["id"],
@@ -260,6 +257,8 @@ def rescore_all_alerts(conn):
             alert["source_id"],
             created_at=alert["created_at"],
             published_at=alert["published_at"],
+            frequency_override=score_args[0] if score_args else None,
+            z_score_override=score_args[1] if score_args else None,
         )
         count += 1
     conn.commit()
@@ -302,9 +301,15 @@ def update_source_credibility_bayesian(conn, source_id, is_true_positive):
 
 def compute_evaluation_metrics(conn, source_id=None):
     """
-    Compute precision, recall, and F1 for each source.
+    Compute precision, estimated recall, and F1 for each source.
+
     Precision = TP / (TP + FP)
-    Recall = TP / (TP + FN) where FN ~ reviewed but unclassified
+    Estimated Recall = TP / (TP + FN_est)
+
+    Note: FN is *estimated* as ``reviewed_count - TP - FP``, i.e. reviewed
+    alerts that were not explicitly classified.  This is an approximation;
+    analysts who review without classifying inflate FN and depress recall.
+    Enforce TP/FP classification on every reviewed alert for accurate recall.
     """
     if source_id is not None:
         source = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
@@ -337,10 +342,11 @@ def compute_evaluation_metrics(conn, source_id=None):
                 "false_positives": fp,
                 "total_reviewed": reviewed_count,
                 "precision": round(precision, 4),
-                "recall": round(recall, 4),
+                "recall_estimated": round(recall, 4),
                 "f1_score": round(f1, 4),
                 "bayesian_credibility": round(alpha / (alpha + beta), 4),
                 "static_credibility": src["credibility_score"] or 0.5,
+                "recall_note": "Estimated: FN = reviewed - TP - FP. Classify all reviewed alerts for accurate recall.",
             }
         )
 

@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 
 from analytics.spike_detection import detect_spikes
+from analytics.utils import utcnow
 from database.init_db import get_connection
 
 
@@ -25,7 +26,7 @@ def generate_daily_report(report_date=None):
     """
     conn = get_connection()
     if report_date is None:
-        report_date = datetime.utcnow().strftime("%Y-%m-%d")
+        report_date = utcnow().strftime("%Y-%m-%d")
 
     next_date = (datetime.strptime(report_date, "%Y-%m-%d") + timedelta(days=1)).strftime(
         "%Y-%m-%d"

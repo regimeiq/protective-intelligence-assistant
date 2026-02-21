@@ -1,6 +1,7 @@
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import timedelta
 
+from analytics.utils import utcnow
 from database.init_db import get_connection
 
 IOC_TYPES = {"ipv4", "domain", "url", "cve", "md5", "sha1", "sha256"}
@@ -9,10 +10,13 @@ IOC_TYPES = {"ipv4", "domain", "url", "cve", "md5", "sha1", "sha256"}
 def build_graph(days=7, min_score=70.0, limit_alerts=500):
     """
     Build a compact link-analysis graph for high-risk recent alerts.
+
+    Uses a single bulk query for entities instead of per-alert lookups
+    to avoid the N+1 query pattern.
     """
     safe_days = max(1, min(int(days), 30))
     safe_limit = max(1, min(int(limit_alerts), 2000))
-    cutoff = (datetime.utcnow() - timedelta(days=safe_days)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (utcnow() - timedelta(days=safe_days)).strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_connection()
     alerts = conn.execute(
@@ -28,6 +32,25 @@ def build_graph(days=7, min_score=70.0, limit_alerts=500):
         LIMIT ?""",
         (cutoff, float(min_score), safe_limit),
     ).fetchall()
+
+    # Bulk-fetch all entities for the selected alerts in a single query
+    # instead of one query per alert (fixes N+1 performance issue).
+    alert_ids = [alert["id"] for alert in alerts]
+    entities_by_alert = defaultdict(list)
+    if alert_ids:
+        # SQLite parameter limit is ~999; chunk if needed
+        chunk_size = 900
+        for i in range(0, len(alert_ids), chunk_size):
+            chunk = alert_ids[i : i + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""SELECT alert_id, entity_type, entity_value
+                FROM alert_entities
+                WHERE alert_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                entities_by_alert[row["alert_id"]].append(row)
 
     node_weights = defaultdict(float)
     node_meta = {}
@@ -48,13 +71,7 @@ def build_graph(days=7, min_score=70.0, limit_alerts=500):
         add_node(keyword_node, alert["keyword_term"], "keyword", alert_weight)
         add_edge(source_node, keyword_node, "source_keyword", alert_weight)
 
-        entities = conn.execute(
-            """SELECT entity_type, entity_value
-            FROM alert_entities
-            WHERE alert_id = ?""",
-            (alert["id"],),
-        ).fetchall()
-        for entity in entities:
+        for entity in entities_by_alert.get(alert["id"], []):
             entity_type = entity["entity_type"]
             entity_value = entity["entity_value"]
             if entity_type in IOC_TYPES:
