@@ -3,9 +3,10 @@ import requests
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import os
 from datetime import datetime, date
 
-API_URL = "http://localhost:8000"
+API_URL = os.getenv("OSINT_API_URL", "http://localhost:8000").rstrip("/")
 
 st.set_page_config(
     page_title="OSINT Threat Monitor",

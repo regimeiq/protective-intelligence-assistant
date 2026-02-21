@@ -3,25 +3,40 @@ Spike detection for keyword frequency trends.
 Identifies keywords with unusual activity levels using Z-score analysis.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from database.init_db import get_connection
 
 
-def detect_spikes(threshold=2.0):
+def _resolve_as_of_date(as_of_date=None):
+    """Resolve optional date input to a datetime object."""
+    if as_of_date is None:
+        return datetime.utcnow()
+    if isinstance(as_of_date, datetime):
+        return as_of_date
+    if isinstance(as_of_date, date):
+        return datetime.combine(as_of_date, datetime.min.time())
+    if isinstance(as_of_date, str):
+        return datetime.strptime(as_of_date, "%Y-%m-%d")
+    raise TypeError("as_of_date must be None, date, datetime, or YYYY-MM-DD string")
+
+
+def detect_spikes(threshold=2.0, as_of_date=None):
     """
     Find keywords whose today count exceeds their 7-day average
     by the given threshold multiplier. Includes Z-score for statistical context.
 
     Args:
         threshold: Minimum ratio of today/average to qualify as a spike (default 2.0)
+        as_of_date: Date anchor for trend comparison (None = today UTC)
 
     Returns:
         List of dicts with keyword info, spike details, and z-score,
         sorted by spike_ratio descending.
     """
     conn = get_connection()
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    seven_days_ago = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
+    as_of_dt = _resolve_as_of_date(as_of_date)
+    today = as_of_dt.strftime("%Y-%m-%d")
+    seven_days_ago = (as_of_dt - timedelta(days=7)).strftime("%Y-%m-%d")
 
     rows = conn.execute(
         """SELECT kf.keyword_id, k.term, k.category, kf.count as today_count,

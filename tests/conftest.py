@@ -1,0 +1,26 @@
+from pathlib import Path
+import sys
+
+import pytest
+from fastapi.testclient import TestClient
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from api.main import app
+from database import init_db as db_init
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    db_path = Path(tmp_path) / "osint_test.db"
+    monkeypatch.setattr(db_init, "DB_PATH", str(db_path))
+
+    db_init.init_db()
+    db_init.migrate_schema()
+    db_init.seed_default_sources()
+    db_init.seed_default_keywords()
+    db_init.seed_threat_actors()
+
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
