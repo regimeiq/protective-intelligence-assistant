@@ -1,9 +1,9 @@
 """Operational risk scoring for Protective Intelligence workflows."""
 
-from datetime import timedelta
+from math import asin, cos, radians, sin, sqrt
 
 from analytics.risk_scoring import score_to_severity
-from analytics.utils import parse_timestamp, utcnow
+from analytics.utils import utcnow
 
 EP_CATEGORY_BOOST = {
     "protective_intel": 10.0,
@@ -17,6 +17,15 @@ EP_CATEGORY_BOOST = {
     "malware": 2.5,
     "vulnerability": 2.5,
 }
+
+
+def _haversine_miles(lat1, lon1, lat2, lon2):
+    radius_miles = 3958.756
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    c = 2 * asin(sqrt(a))
+    return radius_miles * c
 
 
 def _compute_proximity_factor(conn, alert_id):
@@ -41,19 +50,35 @@ def _compute_proximity_factor(conn, alert_id):
 
 
 def _compute_event_factor(conn, alert_id):
-    rows = conn.execute(
-        """SELECT ap.distance_miles
-        FROM alert_proximity ap
-        JOIN protected_locations pl ON pl.id = ap.protected_location_id
-        JOIN events e ON e.lat IS NOT NULL AND e.lon IS NOT NULL
-        WHERE ap.alert_id = ?
-          AND datetime(e.start_dt) >= datetime('now')
-          AND datetime(e.start_dt) <= datetime('now', '+7 days')""",
+    alert_locations = conn.execute(
+        """SELECT lat, lon
+        FROM alert_locations
+        WHERE alert_id = ? AND lat IS NOT NULL AND lon IS NOT NULL""",
         (alert_id,),
     ).fetchall()
-    if not rows:
+    if not alert_locations:
         return 0.0
-    min_distance = min(float(row["distance_miles"] or 9999) for row in rows)
+
+    events = conn.execute(
+        """SELECT lat, lon
+        FROM events
+        WHERE lat IS NOT NULL AND lon IS NOT NULL
+          AND datetime(start_dt) >= datetime('now')
+          AND datetime(start_dt) <= datetime('now', '+7 days')"""
+    ).fetchall()
+    if not events:
+        return 0.0
+
+    min_distance = None
+    for loc in alert_locations:
+        lat1 = float(loc["lat"])
+        lon1 = float(loc["lon"])
+        for event in events:
+            distance = _haversine_miles(lat1, lon1, float(event["lat"]), float(event["lon"]))
+            if min_distance is None or distance < min_distance:
+                min_distance = distance
+    if min_distance is None:
+        return 0.0
     if min_distance <= 10:
         return 8.0
     if min_distance <= 25:
@@ -137,23 +162,36 @@ def compute_operational_score(conn, alert_id):
 
 def compute_event_risk_snapshots(conn):
     upcoming = conn.execute(
-        """SELECT id FROM events
+        """SELECT id, lat, lon FROM events
         WHERE datetime(start_dt) >= datetime('now')
           AND datetime(start_dt) <= datetime('now', '+7 days')"""
     ).fetchall()
 
+    alert_locations = conn.execute(
+        """SELECT a.id AS alert_id, a.ors_score, al.lat, al.lon
+        FROM alerts a
+        JOIN alert_locations al ON al.alert_id = a.id
+        WHERE a.duplicate_of IS NULL
+          AND a.ors_score IS NOT NULL
+          AND al.lat IS NOT NULL AND al.lon IS NOT NULL
+          AND datetime(COALESCE(a.published_at, a.created_at)) >= datetime('now', '-7 days')"""
+    ).fetchall()
+
     for event in upcoming:
-        rows = conn.execute(
-            """SELECT a.ors_score
-            FROM alerts a
-            JOIN alert_locations al ON al.alert_id = a.id
-            JOIN events e ON e.id = ?
-            WHERE a.duplicate_of IS NULL
-              AND al.lat IS NOT NULL AND al.lon IS NOT NULL
-              AND datetime(COALESCE(a.published_at, a.created_at)) >= datetime('now', '-7 days')""",
-            (event["id"],),
-        ).fetchall()
-        scores = [float(row["ors_score"] or 0.0) for row in rows if row["ors_score"] is not None]
+        if event["lat"] is None or event["lon"] is None:
+            continue
+        event_lat = float(event["lat"])
+        event_lon = float(event["lon"])
+        nearby_scores = {}
+        for row in alert_locations:
+            distance = _haversine_miles(event_lat, event_lon, float(row["lat"]), float(row["lon"]))
+            if distance <= 25.0:
+                alert_id = int(row["alert_id"])
+                score = float(row["ors_score"] or 0.0)
+                previous = nearby_scores.get(alert_id)
+                if previous is None or score > previous:
+                    nearby_scores[alert_id] = score
+        scores = list(nearby_scores.values())
         if not scores:
             continue
         scores.sort()

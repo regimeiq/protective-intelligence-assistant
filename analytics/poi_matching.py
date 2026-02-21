@@ -22,7 +22,11 @@ def _find_fuzzy_matches(text, alias, threshold=0.90):
     if len(alias_tokens) < 2:
         return []
 
-    text_tokens = re.findall(r"\b[\w'.-]+\b", text)
+    token_spans = [
+        (match.group(0), match.start(), match.end())
+        for match in re.finditer(r"\b[\w'.-]+\b", text)
+    ]
+    text_tokens = [token for token, _, _ in token_spans]
     if len(text_tokens) < len(alias_tokens):
         return []
 
@@ -32,12 +36,9 @@ def _find_fuzzy_matches(text, alias, threshold=0.90):
         candidate = " ".join(text_tokens[idx : idx + len(alias_tokens)])
         score = SequenceMatcher(None, lowered_alias, candidate.lower()).ratio()
         if score >= threshold:
-            # map token span back to character span
-            first = candidate.split()[0]
-            start = text.lower().find(first.lower())
-            if start == -1:
-                continue
-            end = start + len(candidate)
+            # Map the token window directly back to character offsets.
+            start = token_spans[idx][1]
+            end = token_spans[idx + len(alias_tokens) - 1][2]
             matches.append((start, end, score))
     return matches
 
