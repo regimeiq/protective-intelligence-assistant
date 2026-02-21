@@ -18,6 +18,7 @@ from scraper.pastebin_monitor import run_pastebin_scraper
 from scraper.reddit_scraper import run_reddit_scraper
 from scraper.rss_scraper import (
     alert_exists,
+    fetch_rss_feed,
     get_active_keywords,
     get_active_sources,
     match_keywords,
@@ -85,6 +86,17 @@ async def _fetch_url_async(session, url, timeout=15):
         return None
 
 
+def _make_aiohttp_session():
+    """
+    Build an aiohttp session with larger header limits for feeds that emit long headers.
+    Falls back to defaults if the installed aiohttp version lacks these parameters.
+    """
+    try:
+        return aiohttp.ClientSession(max_line_size=65536, max_field_size=65536)
+    except TypeError:
+        return aiohttp.ClientSession()
+
+
 async def run_rss_scraper_async(frequency_snapshot=None):
     """
     Async RSS scraper: fetch all RSS feeds concurrently via aiohttp,
@@ -110,24 +122,40 @@ async def run_rss_scraper_async(frequency_snapshot=None):
     duplicates = 0
 
     # Fetch all feeds concurrently
-    async with aiohttp.ClientSession() as session:
+    async with _make_aiohttp_session() as session:
         tasks = [_fetch_url_async(session, s["url"]) for s in sources]
         raw_responses = await asyncio.gather(*tasks)
 
     # Process each feed synchronously (SQLite writes)
     for source, raw_text in zip(sources, raw_responses):
-        if not raw_text:
-            print(f"Skipping {source['name']} (fetch failed)")
-            continue
+        if raw_text:
+            print(f"Processing: {source['name']}")
+            feed = feedparser.parse(raw_text)
+            parsed_entries = [
+                {
+                    "title": entry.get("title", ""),
+                    "content": entry.get("summary", entry.get("description", "")),
+                    "url": entry.get("link", ""),
+                    "published": parse_entry_published_at(entry),
+                }
+                for entry in feed.entries
+            ]
+        else:
+            print(f"Async fetch failed for {source['name']}; trying sync RSS fallback.")
+            try:
+                parsed_entries = fetch_rss_feed(source["url"])
+            except Exception as e:
+                print(f"Skipping {source['name']} (fallback failed): {e}")
+                continue
+            if not parsed_entries:
+                print(f"Skipping {source['name']} (no entries from fallback)")
+                continue
 
-        print(f"Processing: {source['name']}")
-        feed = feedparser.parse(raw_text)
-
-        for entry in feed.entries:
+        for entry in parsed_entries:
             title = entry.get("title", "")
-            content = entry.get("summary", entry.get("description", ""))
-            url = entry.get("link", "")
-            published_at = parse_entry_published_at(entry)
+            content = entry.get("content", "")
+            url = entry.get("url", "")
+            published_at = entry.get("published")
             combined_text = f"{title} {content}"
             matches = match_keywords(combined_text, keywords)
 
@@ -202,7 +230,7 @@ async def run_reddit_scraper_async(frequency_snapshot=None):
     new_alerts = 0
     duplicates = 0
 
-    async with aiohttp.ClientSession() as session:
+    async with _make_aiohttp_session() as session:
         tasks = [_fetch_url_async(session, s["url"]) for s in sources]
         raw_responses = await asyncio.gather(*tasks)
 
