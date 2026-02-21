@@ -1,10 +1,12 @@
 import json
 import os
+import secrets
 import sys
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -17,10 +19,32 @@ from database.init_db import (
     seed_threat_actors,
 )
 
+# --- API Key Authentication ---
+# Set OSINT_API_KEY env var to enable auth on mutation endpoints.
+# When unset, auth is disabled (local-only development mode).
+_API_KEY = os.getenv("OSINT_API_KEY", "")
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(api_key: Optional[str] = Security(_api_key_header)):
+    """Verify the API key for mutation endpoints.
+
+    When OSINT_API_KEY is not set, auth is bypassed (development mode).
+    When set, all mutation endpoints require a matching X-API-Key header.
+    """
+    if not _API_KEY:
+        return  # Auth disabled — development mode
+    if not api_key or not secrets.compare_digest(api_key, _API_KEY):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid or missing API key. Set X-API-Key header.",
+        )
+
+
 app = FastAPI(
     title="OSINT Threat Monitor API",
     description="Protective Intelligence REST API — quantitative risk scoring, Bayesian credibility, Z-score anomaly detection, and structured analytical reporting",
-    version="3.0.0",
+    version="3.1.0",
 )
 
 
@@ -75,7 +99,7 @@ def startup():
 
 @app.get("/")
 def root():
-    return {"status": "online", "service": "OSINT Threat Monitor", "version": "3.0.0"}
+    return {"status": "online", "service": "OSINT Threat Monitor", "version": "3.1.0"}
 
 
 # --- ALERTS ---
@@ -172,7 +196,7 @@ def get_alerts_summary():
     }
 
 
-@app.patch("/alerts/{alert_id}/review")
+@app.patch("/alerts/{alert_id}/review", dependencies=[Depends(verify_api_key)])
 def mark_reviewed(alert_id: int):
     conn = get_connection()
     result = conn.execute("UPDATE alerts SET reviewed = 1 WHERE id = ?", (alert_id,))
@@ -184,7 +208,7 @@ def mark_reviewed(alert_id: int):
     return {"status": "reviewed", "alert_id": alert_id}
 
 
-@app.patch("/alerts/{alert_id}/classify")
+@app.patch("/alerts/{alert_id}/classify", dependencies=[Depends(verify_api_key)])
 def classify_alert(alert_id: int, body: ClassifyRequest):
     """
     Classify an alert as true_positive or false_positive.
@@ -240,7 +264,13 @@ def get_alert_score(
     n: int = Query(default=500, ge=100, le=5000),
     force: int = Query(default=0, ge=0, le=1),
 ):
-    """Get the score breakdown for a specific alert, including Monte Carlo interval stats."""
+    """Get the score breakdown for a specific alert, including Monte Carlo interval stats.
+
+    When uncertainty is enabled, severity_adjusted is derived from the
+    interval mean rather than the point estimate to reduce oscillation
+    near severity boundaries.
+    """
+    from analytics.risk_scoring import score_to_severity_with_uncertainty
     from analytics.uncertainty import compute_uncertainty_for_alert
 
     conn = get_connection()
@@ -257,11 +287,18 @@ def get_alert_score(
     payload = dict(score)
     if uncertainty == 1:
         try:
-            payload["uncertainty"] = compute_uncertainty_for_alert(
+            interval = compute_uncertainty_for_alert(
                 alert_id=alert_id,
                 n=n,
                 force=bool(force),
             )
+            payload["uncertainty"] = interval
+            # Derive severity from interval mean to avoid boundary oscillation
+            severity_adj, used_score = score_to_severity_with_uncertainty(
+                payload.get("final_score", 0), interval.get("mean")
+            )
+            payload["severity_adjusted"] = severity_adj
+            payload["severity_score_basis"] = round(used_score, 3)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
     return payload
@@ -306,7 +343,7 @@ def get_alert_iocs(alert_id: int):
     return [dict(ioc) for ioc in iocs]
 
 
-@app.post("/alerts/rescore")
+@app.post("/alerts/rescore", dependencies=[Depends(verify_api_key)])
 def trigger_rescore():
     """Re-score all unreviewed alerts with current weights and frequencies."""
     from analytics.risk_scoring import rescore_all_alerts
@@ -513,7 +550,7 @@ def get_keywords():
     return [dict(k) for k in keywords]
 
 
-@app.post("/keywords")
+@app.post("/keywords", dependencies=[Depends(verify_api_key)])
 def add_keyword(keyword: KeywordCreate):
     conn = get_connection()
     try:
@@ -530,7 +567,7 @@ def add_keyword(keyword: KeywordCreate):
     return dict(new_keyword)
 
 
-@app.delete("/keywords/{keyword_id}")
+@app.delete("/keywords/{keyword_id}", dependencies=[Depends(verify_api_key)])
 def delete_keyword(keyword_id: int):
     conn = get_connection()
     result = conn.execute("DELETE FROM keywords WHERE id = ?", (keyword_id,))
@@ -542,7 +579,7 @@ def delete_keyword(keyword_id: int):
     return {"status": "deleted", "keyword_id": keyword_id}
 
 
-@app.patch("/keywords/{keyword_id}/weight")
+@app.patch("/keywords/{keyword_id}/weight", dependencies=[Depends(verify_api_key)])
 def update_keyword_weight(keyword_id: int, weight: float = Query(ge=0.1, le=5.0)):
     """Update a keyword's threat weight."""
     conn = get_connection()
@@ -569,7 +606,7 @@ def get_sources():
     return [dict(s) for s in sources]
 
 
-@app.patch("/sources/{source_id}/credibility")
+@app.patch("/sources/{source_id}/credibility", dependencies=[Depends(verify_api_key)])
 def update_source_credibility(source_id: int, credibility_score: float = Query(ge=0.0, le=1.0)):
     """Update a source's credibility score."""
     conn = get_connection()

@@ -10,9 +10,10 @@ Architecture:
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from analytics.entity_extraction import extract_and_store_alert_entities
+from analytics.utils import utcnow
 from database.init_db import get_connection
 from scraper.pastebin_monitor import run_pastebin_scraper
 from scraper.reddit_scraper import run_reddit_scraper
@@ -38,7 +39,7 @@ def _record_scrape_run(scraper_type, started_at, total_alerts, status="completed
     """Record scrape run metrics to scrape_runs table."""
     try:
         conn = get_connection()
-        completed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        completed_at = utcnow().strftime("%Y-%m-%d %H:%M:%S")
         duration = time.time() - started_at
         aps = total_alerts / duration if duration > 0 else 0.0
 
@@ -48,7 +49,7 @@ def _record_scrape_run(scraper_type, started_at, total_alerts, status="completed
              duration_seconds, alerts_per_second, status)
             VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
-                datetime.utcfromtimestamp(started_at).strftime("%Y-%m-%d %H:%M:%S"),
+                datetime.fromtimestamp(started_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 completed_at,
                 scraper_type,
                 total_alerts,
@@ -76,11 +77,24 @@ def _build_run_frequency_snapshot():
         conn.close()
 
 
+# Concurrency control: limit parallel requests to avoid overwhelming targets
+_MAX_CONCURRENT_REQUESTS = 10
+_semaphore = None
+
+
+def _get_semaphore():
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(_MAX_CONCURRENT_REQUESTS)
+    return _semaphore
+
+
 async def _fetch_url_async(session, url, timeout=15):
-    """Fetch a URL asynchronously, return text content."""
+    """Fetch a URL asynchronously with concurrency limiting, return text content."""
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-            return await resp.text()
+        async with _get_semaphore():
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                return await resp.text()
     except Exception as e:
         print(f"Async fetch error for {url}: {e}")
         return None

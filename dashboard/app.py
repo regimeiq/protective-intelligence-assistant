@@ -566,7 +566,7 @@ with tab_forecast:
             quality = forecast_payload.get("quality", {})
             if forecast:
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Method", forecast[0].get("method", "unknown"))
+                c1.metric("Method", forecast_payload.get("method") or forecast[0].get("method", "unknown"))
                 c2.metric(
                     "SMAPE",
                     f"{quality.get('smape', 0):.2f}" if quality.get("smape") is not None else "N/A",
@@ -715,7 +715,11 @@ with tab_scoring:
     st.divider()
 
     # --- Precision / Recall / F1 ---
-    st.markdown("### Precision / Recall / F1 by Source")
+    st.markdown("### Precision / Recall (Est.) / F1 by Source")
+    st.caption(
+        "Recall is estimated: FN = reviewed - TP - FP. "
+        "Classify all reviewed alerts as TP/FP for accurate recall."
+    )
     try:
         eval_data = requests.get(f"{API_URL}/analytics/evaluation").json()
         if eval_data:
@@ -728,7 +732,7 @@ with tab_scoring:
                     "false_positives",
                     "total_reviewed",
                     "precision",
-                    "recall",
+                    "recall_estimated",
                     "f1_score",
                     "bayesian_credibility",
                 ]
@@ -743,7 +747,7 @@ with tab_scoring:
                             "false_positives": "FP",
                             "total_reviewed": "Reviewed",
                             "precision": "Precision",
-                            "recall": "Recall",
+                            "recall_estimated": "Recall (Est.)",
                             "f1_score": "F1 Score",
                             "bayesian_credibility": "Bayesian Cred",
                         }
@@ -753,6 +757,7 @@ with tab_scoring:
                 )
 
                 # Grouped bar chart for P/R/F1
+                recall_col = "recall_estimated" if "recall_estimated" in eval_df.columns else "recall"
                 if len(eval_df) > 0:
                     fig_prf = go.Figure()
                     fig_prf.add_trace(
@@ -765,9 +770,9 @@ with tab_scoring:
                     )
                     fig_prf.add_trace(
                         go.Bar(
-                            name="Recall",
+                            name="Recall (Est.)",
                             x=eval_df["source_name"],
-                            y=eval_df["recall"],
+                            y=eval_df[recall_col],
                             marker_color="#3b82f6",
                         )
                     )

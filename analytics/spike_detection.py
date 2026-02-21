@@ -5,13 +5,14 @@ Identifies keywords with unusual activity levels using Z-score analysis.
 
 from datetime import date, datetime, timedelta
 
+from analytics.utils import utcnow
 from database.init_db import get_connection
 
 
 def _resolve_as_of_date(as_of_date=None):
     """Resolve optional date input to a datetime object."""
     if as_of_date is None:
-        return datetime.utcnow()
+        return utcnow()
     if isinstance(as_of_date, datetime):
         return as_of_date
     if isinstance(as_of_date, date):
@@ -92,7 +93,7 @@ def get_keyword_trend(keyword_id, days=14):
     Used for trend sparklines in the dashboard.
     """
     conn = get_connection()
-    start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    start_date = (utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
     rows = conn.execute(
         """SELECT date, count FROM keyword_frequency
         WHERE keyword_id = ? AND date >= ?

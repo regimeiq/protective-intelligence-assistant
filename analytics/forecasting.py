@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+from analytics.utils import utcnow
 from database.init_db import get_connection
 
 
@@ -103,13 +104,14 @@ def forecast_keyword(keyword_id, horizon=7):
     history = dense[-30:]
 
     if not dense:
-        today = datetime.utcnow()
+        today = utcnow()
         forecast = []
         for step, point in enumerate(_naive_forecast(0, safe_horizon), start=1):
             forecast_date = (today + timedelta(days=step)).strftime("%Y-%m-%d")
             forecast.append({"date": forecast_date, **point, "method": "naive_last_value"})
         return {
             "keyword_id": keyword_id,
+            "method": "naive_last_value",
             "forecast": forecast,
             "quality": {"smape": None, "n_train_days": 0},
             "history": history,
@@ -150,6 +152,7 @@ def forecast_keyword(keyword_id, horizon=7):
 
     return {
         "keyword_id": keyword_id,
+        "method": method,
         "forecast": forecast,
         "quality": quality,
         "history": history,

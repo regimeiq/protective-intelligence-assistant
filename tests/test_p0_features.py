@@ -2,6 +2,7 @@ import math
 from datetime import datetime, timedelta
 
 from analytics.entity_extraction import extract_and_store_alert_entities
+from analytics.utils import utcnow
 from analytics.extraction import extract, extract_and_store_alert_artifacts
 from analytics.risk_scoring import score_alert
 from analytics.uncertainty import score_distribution
@@ -23,7 +24,7 @@ def _insert_alert(source_id, keyword_id, title, content, url, risk_score=90.0):
             "ransomware",
             "high",
             risk_score,
-            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         ),
     )
     alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -73,7 +74,7 @@ def test_ioc_endpoint_and_daily_report_include_cve(client):
     ioc_values = [ioc["value"] for ioc in ioc_resp.json() if ioc["type"] == "cve"]
     assert "CVE-2026-42424" in ioc_values
 
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = utcnow().strftime("%Y-%m-%d")
     report_resp = client.get("/intelligence/daily", params={"date": today})
     assert report_resp.status_code == 200
     assert "CVE-2026-42424" in report_resp.json().get("new_cves", [])
@@ -178,7 +179,7 @@ def test_score_endpoint_uncertainty_works_without_weight_sigma(client):
 def test_forecast_fallback_and_ewma_modes(client):
     conn = get_connection()
     keyword_id = conn.execute("SELECT id FROM keywords WHERE term = 'ransomware'").fetchone()["id"]
-    start = datetime.utcnow() - timedelta(days=30)
+    start = utcnow() - timedelta(days=30)
 
     # Sparse history first -> naive fallback.
     for i in range(10):
