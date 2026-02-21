@@ -1,10 +1,10 @@
 # OSINT Threat Monitor — Protective Intelligence Platform
 
-Automated threat intelligence platform that collects, processes, scores, and prioritizes open-source threat data. Built for corporate security teams, executive protection analysts, and SOC operators who need structured, actionable intelligence — not just raw alerts.
+Automated threat intelligence platform that collects, processes, scores, and prioritizes open-source threat data using **statistically-grounded quantitative methods** — Z-score anomaly detection, Bayesian credibility learning, content deduplication, and backtested scoring models. Built for corporate security teams, executive protection analysts, and SOC operators who need structured, actionable intelligence — not just raw alerts.
 
 ## The Problem
 
-Security teams drown in unstructured threat data. RSS feeds, Reddit threads, paste dumps — the volume is overwhelming, and most of it is noise. Traditional monitoring tools tell you *what happened*. This platform tells you *what matters right now and why*.
+Security teams drown in unstructured threat data. RSS feeds, Reddit threads, paste dumps — the volume is overwhelming, and most of it is noise. Traditional monitoring tools tell you *what happened*. This platform tells you *what matters right now and why* — with statistically defensible scoring that learns from analyst feedback.
 
 ## Who It's For
 
@@ -21,48 +21,80 @@ This platform implements the full intelligence cycle:
 ┌─────────────┐    ┌─────────────┐    ┌──────────────────┐    ┌─────────────────┐    ┌─────────────┐
 │  Collection  │───▶│  Processing │───▶│    Indicator      │───▶│ Prioritization  │───▶│  Escalation │
 │              │    │             │    │    Matching        │    │                 │    │             │
-│ RSS feeds    │    │ Normalize   │    │ Weighted keyword  │    │ Multi-factor    │    │ Daily intel │
-│ Reddit       │    │ Deduplicate │    │ matching with     │    │ risk scoring    │    │ reports     │
-│ Pastebin     │    │ Extract     │    │ regex boundaries  │    │ engine          │    │ Escalation  │
-│              │    │             │    │                    │    │                 │    │ recs        │
+│ RSS feeds    │    │ Normalize   │    │ Weighted keyword  │    │ Z-score anomaly │    │ Daily intel │
+│ Reddit       │    │ Deduplicate │    │ matching with     │    │ detection +     │    │ reports     │
+│ Pastebin     │    │ Hash + Fuzzy│    │ regex boundaries  │    │ Bayesian cred.  │    │ Escalation  │
+│ (async)      │    │             │    │                    │    │ scoring         │    │ recs        │
 └─────────────┘    └─────────────┘    └──────────────────┘    └─────────────────┘    └─────────────┘
 ```
 
 ## Key Capabilities
 
 ### Multi-Factor Risk Scoring Engine
+
 Every alert receives a quantified 0-100 risk score based on:
 
 ```
 Risk Score = (keyword_weight x frequency_factor x source_credibility x 20) + (recency_factor x 10)
 ```
 
-| Factor | Range | Description |
-|--------|-------|-------------|
-| Keyword Weight | 0.1 - 5.0 | Threat severity of the matched term (zero-day = 5.0, dark web = 1.5) |
-| Source Credibility | 0.0 - 1.0 | Trustworthiness of the source (CISA = 1.0, Pastebin = 0.2) |
-| Frequency Factor | 1.0+ | Spike multiplier — today's count vs 7-day rolling average |
-| Recency Factor | 0.1 - 1.0 | Linear decay over 7 days — newer alerts score higher |
+| Factor | Range | Method | Description |
+|--------|-------|--------|-------------|
+| Keyword Weight | 0.1 - 5.0 | Manual | Threat severity of the matched term (zero-day = 5.0, dark web = 1.5) |
+| Source Credibility | 0.0 - 1.0 | **Bayesian Beta** | Learned from TP/FP classifications: `alpha / (alpha + beta)` |
+| Frequency Factor | 1.0 - 4.0 | **Z-Score** | `z = (today - mean_7d) / std_7d`, mapped to multiplier |
+| Recency Factor | 0.1 - 1.0 | Linear decay | Over 7 days — newer alerts score higher |
 
 Score-to-severity mapping: **90+ = Critical**, **70-89 = High**, **40-69 = Medium**, **0-39 = Low**
 
+### Z-Score Anomaly Detection
+
+Frequency spikes are detected using population Z-scores rather than simple ratios. The system computes `z = (today_count - mean_7d) / std_dev_7d` for each keyword, with a standard deviation floor of 0.5 to prevent near-zero division. Z-scores map to frequency multipliers: z <= 0 maps to 1.0x, z >= 4 maps to 4.0x. Falls back to simple ratio when fewer than 3 days of data exist.
+
+### Bayesian Source Credibility
+
+Source trustworthiness is modeled as a Beta distribution. Each source starts with a uniform prior (alpha=2, beta=2). When analysts classify alerts as true or false positives, the system updates:
+- True positive: `alpha += 1` (source becomes more credible)
+- False positive: `beta += 1` (source becomes less credible)
+
+Credibility converges toward empirical precision as classifications accumulate.
+
+### Content Deduplication
+
+Two-tier dedup pipeline prevents duplicate alerts from inflating risk signals:
+1. **Fast path**: SHA-256 hash of normalized title+content (O(1) index lookup)
+2. **Slow path**: Fuzzy title matching via SequenceMatcher (0.85 threshold, bounded to 200 same-day candidates)
+
+Duplicates are stored with `duplicate_of` references but excluded from scoring, frequency counts, and intelligence reports.
+
+### Async Ingestion
+
+HTTP fetches use `aiohttp` for concurrent source collection. RSS and Reddit feeds are fetched in parallel; Pastebin stays sequential (rate-limited). Falls back to synchronous mode if aiohttp is unavailable. Performance metrics (duration, alerts/sec) are recorded per run.
+
+### Backtesting Framework
+
+8-incident golden dataset (SolarWinds, Log4Shell, MOVEit, Colonial Pipeline, Kaseya, ProxyLogon, PrintNightmare, CrowdStrike) validates the scoring model against a naive baseline (`keyword_weight x 20`). The backtest compares detection rates, mean scores, and severity accuracy.
+
+### Evaluation Metrics
+
+Per-source precision, recall, and F1 scores computed from analyst TP/FP classifications. Persisted to `evaluation_metrics` table for trend tracking.
+
 ### Daily Intelligence Reports
+
 Automated structured analytical output including:
 - Executive summary with prioritized risk narrative
-- Top 10 risks ranked by score
-- Emerging themes via frequency spike detection
+- Top 10 risks ranked by score (unique alerts only, deduped)
+- Emerging themes via Z-score spike detection
 - Active threat actor cross-referencing (APT28, Lazarus, LockBit, etc.)
 - Escalation recommendations with priority levels (IMMEDIATE / HIGH / MEDIUM)
 
-### Frequency Spike Detection
-Identifies keywords with abnormal activity levels by comparing real-time counts against rolling 7-day baselines. A keyword normally appearing 2x/day that spikes to 10x triggers escalation.
-
 ### Threat Actor Correlation
+
 Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandworm, LockBit, BlackCat, etc.) and cross-references alert keyword matches to identify relevant actor activity.
 
 ## Example Scenario
 
-> A supply chain attack is trending across multiple sources. The system detects "supply chain attack" spiking 4x above its 7-day baseline. The keyword has a weight of 4.0. A CISA alert (credibility: 1.0) mentions it, producing a risk score of **90.0 (CRITICAL)**. The daily intelligence report flags it as an IMMEDIATE escalation item with the recommendation: "Review and assess impact. Brief stakeholders within 1 hour."
+> A supply chain attack is trending across multiple sources. The system detects "supply chain attack" with a Z-score of 3.2 (today's count is 3.2 standard deviations above the 7-day mean). The keyword has a weight of 4.0. A CISA alert (Bayesian credibility: 1.0 after 15 TP classifications) mentions it, producing a risk score of **94.2 (CRITICAL)**. The daily intelligence report flags it as an IMMEDIATE escalation item. An analyst classifies the alert as a true positive, which reinforces CISA's Bayesian credibility for future scoring.
 
 ## Architecture
 
@@ -72,22 +104,24 @@ Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandwo
      └─────────┴───────────┴──────────────┴──────────┘
                            │
                     ┌──────▼──────┐
-                    │   Scrapers  │  RSS / Reddit / Pastebin
+                    │  Async      │  aiohttp concurrent fetch
+                    │  Scrapers   │  RSS / Reddit / Pastebin
                     └──────┬──────┘
                            │
                     ┌──────▼──────┐
+                    │  Dedup +    │  SHA-256 hash + fuzzy title
                     │  Keyword    │  Regex word-boundary matching
-                    │  Matching   │  against configurable watchlist
+                    │  Matching   │
                     └──────┬──────┘
                            │
                     ┌──────▼──────┐
-                    │  Risk       │  Multi-factor scoring engine
+                    │  Risk       │  Z-score + Bayesian scoring
                     │  Scoring    │  with audit trail
                     └──────┬──────┘
                            │
                     ┌──────▼──────┐
                     │  SQLite DB  │  Alerts, scores, frequencies,
-                    │             │  threat actors, reports
+                    │  (9 tables) │  threat actors, reports, metrics
                     └──────┬──────┘
                            │
               ┌────────────┼────────────┐
@@ -95,7 +129,7 @@ Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandwo
        ┌──────▼──────┐  ┌─▼──────┐  ┌──▼───────────┐
        │  FastAPI     │  │ Intel  │  │  Streamlit   │
        │  REST API    │  │ Report │  │  Dashboard   │
-       │  (18 endpoints)│ │ Engine │  │  (5 tabs)    │
+       │ (22 endpts)  │  │ Engine │  │  (7 tabs)    │
        └─────────────┘  └────────┘  └──────────────┘
 ```
 
@@ -103,10 +137,10 @@ Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandwo
 
 | Layer | Tool |
 |-------|------|
-| Scraping | Feedparser, BeautifulSoup, Requests |
-| Analytics | Custom risk scoring engine (Python stdlib) |
-| API | FastAPI (18 endpoints) |
-| Database | SQLite (7 tables) |
+| Scraping | Feedparser, BeautifulSoup, aiohttp (async) |
+| Analytics | Z-score, Bayesian Beta, SHA-256 dedup (Python stdlib + aiohttp) |
+| API | FastAPI (22 endpoints) |
+| Database | SQLite (9 tables) |
 | Dashboard | Streamlit + Plotly |
 | Container | Docker, docker-compose |
 | Language | Python 3.11+ |
@@ -139,20 +173,25 @@ python run.py dashboard
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/alerts` | Retrieve alerts (filter by severity, score, review status) |
-| GET | `/alerts/summary` | Aggregated metrics + avg risk score + spike count |
-| GET | `/alerts/{id}/score` | Score breakdown for a specific alert |
+| GET | `/alerts/summary` | Aggregated metrics + avg risk score + spike count + dedup stats |
+| GET | `/alerts/{id}/score` | Score breakdown with Z-score and Bayesian credibility |
 | PATCH | `/alerts/{id}/review` | Mark alert as reviewed |
+| PATCH | `/alerts/{id}/classify` | Classify TP/FP — updates Bayesian source credibility |
 | POST | `/alerts/rescore` | Re-score all unreviewed alerts |
 | GET | `/intelligence/daily` | Generate daily intelligence report |
 | GET | `/intelligence/reports` | List recent reports |
 | GET | `/intelligence/reports/{date}` | Retrieve specific report |
-| GET | `/analytics/spikes` | Detect keyword frequency spikes |
+| GET | `/analytics/spikes` | Detect keyword frequency spikes (with Z-scores) |
 | GET | `/analytics/keyword-trend/{id}` | Keyword frequency over time |
+| GET | `/analytics/evaluation` | Precision/recall/F1 per source |
+| GET | `/analytics/performance` | Scraping run benchmarks (duration, alerts/sec) |
+| GET | `/analytics/backtest` | Run backtest against golden dataset |
+| GET | `/analytics/duplicates` | Content deduplication statistics |
 | GET | `/keywords` | List all keywords with weights |
 | POST | `/keywords` | Add keyword with category and weight |
 | DELETE | `/keywords/{id}` | Remove keyword |
 | PATCH | `/keywords/{id}/weight` | Update keyword threat weight |
-| GET | `/sources` | List sources with credibility scores |
+| GET | `/sources` | List sources with Bayesian credibility scores |
 | PATCH | `/sources/{id}/credibility` | Update source credibility |
 | GET | `/threat-actors` | List known threat actors |
 
@@ -161,20 +200,23 @@ python run.py dashboard
 ```
 osint-threat-monitor/
 ├── analytics/
-│   ├── risk_scoring.py          # Multi-factor risk scoring engine
-│   ├── spike_detection.py       # Keyword frequency spike detection
-│   └── intelligence_report.py   # Daily intelligence report generator
+│   ├── risk_scoring.py          # Z-score + Bayesian multi-factor scoring engine
+│   ├── spike_detection.py       # Z-score keyword frequency spike detection
+│   ├── intelligence_report.py   # Daily intelligence report generator
+│   ├── dedup.py                 # SHA-256 + fuzzy content deduplication
+│   └── backtesting.py           # Golden dataset backtesting framework
 ├── scraper/
+│   ├── __init__.py              # Async orchestration + performance tracking
 │   ├── rss_scraper.py           # RSS feed scraper (CISA, Krebs, BleepingComputer)
 │   ├── reddit_scraper.py        # Reddit threat community scraper
 │   └── pastebin_monitor.py      # Pastebin archive monitor
 ├── api/
-│   └── main.py                  # FastAPI REST API (18 endpoints)
+│   └── main.py                  # FastAPI REST API (22 endpoints)
 ├── dashboard/
-│   └── app.py                   # Streamlit dashboard (5 tabs)
+│   └── app.py                   # Streamlit dashboard (7 tabs)
 ├── database/
 │   ├── init_db.py               # DB init, migration, seeding
-│   └── schema.sql               # SQLite schema (7 tables)
+│   └── schema.sql               # SQLite schema (9 tables)
 ├── config/
 │   └── watchlist.yaml           # Reference keyword/source config
 ├── run.py                       # CLI entry point
@@ -188,23 +230,32 @@ osint-threat-monitor/
 
 | Table | Purpose |
 |-------|---------|
-| `sources` | Intelligence sources with credibility scores |
+| `sources` | Intelligence sources with Bayesian credibility (alpha/beta/TP/FP) |
 | `keywords` | Watchlist terms with threat weights |
-| `alerts` | Matched threat alerts with risk scores |
-| `alert_scores` | Score audit trail (weight breakdown per alert) |
-| `keyword_frequency` | Daily keyword match counts (for spike detection) |
+| `alerts` | Matched threat alerts with risk scores and content hashes |
+| `alert_scores` | Score audit trail (weight breakdown + Z-score per alert) |
+| `keyword_frequency` | Daily keyword match counts (for Z-score spike detection) |
 | `intelligence_reports` | Persisted daily analytical summaries |
 | `threat_actors` | Known threat actor profiles |
+| `evaluation_metrics` | Per-source precision/recall/F1 over time |
+| `scrape_runs` | Scraping performance benchmarks (duration, alerts/sec) |
 
 ## Roadmap
 
 - [x] Multi-source scraping (RSS, Reddit, Pastebin)
-- [x] SQLite database with structured schema
-- [x] FastAPI REST API
+- [x] SQLite database with structured schema (9 tables)
+- [x] FastAPI REST API (22 endpoints)
 - [x] Keyword matching engine with regex boundaries
-- [x] Streamlit dashboard with interactive charts
+- [x] Streamlit dashboard with interactive charts (7 tabs)
 - [x] Multi-factor risk scoring engine
-- [x] Frequency spike detection
+- [x] Z-score anomaly detection for frequency spikes
+- [x] Bayesian source credibility learning (Beta distribution)
+- [x] Content deduplication (SHA-256 + fuzzy title matching)
+- [x] Async scraping with aiohttp
+- [x] Backtesting framework (golden dataset validation)
+- [x] Precision/recall/F1 evaluation metrics
+- [x] TP/FP classification with Bayesian feedback loop
+- [x] Scraping performance tracking
 - [x] Daily intelligence reports with escalation recommendations
 - [x] Threat actor correlation
 - [x] Score audit trail

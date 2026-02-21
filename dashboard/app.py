@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime, date
 
 API_URL = "http://localhost:8000"
@@ -21,12 +22,14 @@ except requests.ConnectionError:
     st.error("Cannot connect to API. Make sure the API server is running on port 8000.")
     st.stop()
 
-# --- Tab layout ---
-tab_overview, tab_intel, tab_alerts, tab_analytics, tab_config = st.tabs([
+# --- Tab layout (7 tabs) ---
+tab_overview, tab_intel, tab_alerts, tab_analytics, tab_scoring, tab_perf, tab_config = st.tabs([
     "📊 Overview",
     "📋 Intelligence Report",
     "🚨 Alert Feed",
     "📈 Analytics",
+    "🧮 Scoring & Evaluation",
+    "⚡ Performance",
     "⚙️ Configuration",
 ])
 
@@ -49,11 +52,21 @@ with tab_overview:
         # KPI Row
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Total Alerts", summary["total_alerts"])
-        col2.metric("Unreviewed", summary["unreviewed"])
+        col2.metric("Unique Alerts", summary.get("unique_alerts", summary["total_alerts"]))
         col3.metric("Critical", summary["by_severity"].get("critical", 0))
         col4.metric("High", summary["by_severity"].get("high", 0))
         col5.metric("Avg Risk Score", f"{summary.get('avg_risk_score', 0):.1f}")
         col6.metric("Active Spikes", summary.get("active_spikes", 0))
+
+        # Second KPI row
+        col7, col8, col9 = st.columns(3)
+        col7.metric("Unreviewed", summary["unreviewed"])
+        col8.metric("Duplicates Detected", summary.get("duplicates", 0))
+        dedup_pct = (
+            round(summary.get("duplicates", 0) / summary["total_alerts"] * 100, 1)
+            if summary["total_alerts"] > 0 else 0
+        )
+        col9.metric("Dedup Rate", f"{dedup_pct}%")
 
         st.divider()
 
@@ -222,7 +235,7 @@ with tab_intel:
 
 
 # ============================================================
-# TAB 3: ALERT FEED
+# TAB 3: ALERT FEED (with TP/FP classification)
 # ============================================================
 with tab_alerts:
     st.subheader("Alert Feed")
@@ -258,15 +271,19 @@ with tab_alerts:
                 icon = SEVERITY_ICONS.get(severity, "⚪")
                 reviewed_tag = "✅" if alert["reviewed"] else "🔲"
                 score = alert.get("risk_score", 0) or 0
+                dup_tag = " [DUP]" if alert.get("duplicate_of") else ""
 
                 with st.expander(
-                    f"{icon} {reviewed_tag} [{severity.upper()} {score:.0f}] {alert['title'][:100]}"
+                    f"{icon} {reviewed_tag} [{severity.upper()} {score:.0f}]{dup_tag} {alert['title'][:100]}"
                 ):
                     mc1, mc2, mc3, mc4 = st.columns(4)
                     mc1.write(f"**Risk Score:** {score:.1f}")
                     mc2.write(f"**Source:** {alert.get('source_name', 'Unknown')}")
                     mc3.write(f"**Keyword:** {alert.get('matched_term', 'N/A')}")
                     mc4.write(f"**Time:** {alert['created_at']}")
+
+                    if alert.get("duplicate_of"):
+                        st.caption(f"Duplicate of alert #{alert['duplicate_of']}")
 
                     if alert.get("url"):
                         st.write(f"**URL:** {alert['url']}")
@@ -280,18 +297,36 @@ with tab_alerts:
                         ).json()
                         if "keyword_weight" in score_data:
                             st.markdown("**Score Breakdown:**")
-                            sc1, sc2, sc3, sc4 = st.columns(4)
+                            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
                             sc1.metric("Keyword Weight", f"{score_data['keyword_weight']:.1f}")
                             sc2.metric("Source Credibility", f"{score_data['source_credibility']:.2f}")
                             sc3.metric("Frequency Factor", f"{score_data['frequency_factor']:.1f}x")
-                            sc4.metric("Recency Factor", f"{score_data['recency_factor']:.2f}")
+                            sc4.metric("Z-Score", f"{score_data.get('z_score', 0):.2f}")
+                            sc5.metric("Recency Factor", f"{score_data['recency_factor']:.2f}")
                     except Exception:
                         pass
 
+                    # Action buttons: Review + Classify
                     if not alert["reviewed"]:
-                        if st.button("Mark Reviewed", key=f"review_{alert['id']}"):
-                            requests.patch(f"{API_URL}/alerts/{alert['id']}/review")
-                            st.rerun()
+                        btn_col1, btn_col2, btn_col3 = st.columns(3)
+                        with btn_col1:
+                            if st.button("Mark Reviewed", key=f"review_{alert['id']}"):
+                                requests.patch(f"{API_URL}/alerts/{alert['id']}/review")
+                                st.rerun()
+                        with btn_col2:
+                            if st.button("✅ True Positive", key=f"tp_{alert['id']}"):
+                                requests.patch(
+                                    f"{API_URL}/alerts/{alert['id']}/classify",
+                                    json={"classification": "true_positive"},
+                                )
+                                st.rerun()
+                        with btn_col3:
+                            if st.button("❌ False Positive", key=f"fp_{alert['id']}"):
+                                requests.patch(
+                                    f"{API_URL}/alerts/{alert['id']}/classify",
+                                    json={"classification": "false_positive"},
+                                )
+                                st.rerun()
         else:
             st.info("No alerts found matching your filters.")
 
@@ -319,7 +354,16 @@ with tab_analytics:
             )
             fig_spike.update_layout(height=400)
             st.plotly_chart(fig_spike, use_container_width=True)
-            st.dataframe(spike_df, use_container_width=True, hide_index=True)
+
+            # Show z-score column in table
+            display_cols = [c for c in ["term", "category", "today_count", "avg_7d", "spike_ratio", "z_score"] if c in spike_df.columns]
+            st.dataframe(
+                spike_df[display_cols].rename(columns={
+                    "term": "Keyword", "category": "Category", "today_count": "Today",
+                    "avg_7d": "7d Avg", "spike_ratio": "Spike Ratio", "z_score": "Z-Score",
+                }),
+                use_container_width=True, hide_index=True,
+            )
         else:
             st.info("No keyword spikes detected above threshold. Spike detection requires 3+ days of scraping history.")
     except Exception as e:
@@ -376,7 +420,224 @@ with tab_analytics:
 
 
 # ============================================================
-# TAB 5: CONFIGURATION
+# TAB 5: SCORING & EVALUATION
+# ============================================================
+with tab_scoring:
+    st.subheader("Scoring Model & Evaluation Metrics")
+
+    # --- Bayesian vs Static Credibility ---
+    st.markdown("### Bayesian vs Static Source Credibility")
+    try:
+        sources = requests.get(f"{API_URL}/sources").json()
+        if sources:
+            cred_data = []
+            for src in sources:
+                alpha = src.get("bayesian_alpha", 2.0) or 2.0
+                beta_val = src.get("bayesian_beta", 2.0) or 2.0
+                bayesian_cred = round(alpha / (alpha + beta_val), 4)
+                static_cred = src.get("credibility_score", 0.5) or 0.5
+                cred_data.append({
+                    "Source": src["name"],
+                    "Static Credibility": static_cred,
+                    "Bayesian Credibility": bayesian_cred,
+                    "Alpha": alpha,
+                    "Beta": beta_val,
+                    "TP": src.get("true_positives", 0) or 0,
+                    "FP": src.get("false_positives", 0) or 0,
+                })
+
+            cred_df = pd.DataFrame(cred_data)
+            fig_cred = go.Figure()
+            fig_cred.add_trace(go.Bar(
+                name="Static", x=cred_df["Source"], y=cred_df["Static Credibility"],
+                marker_color="#94a3b8",
+            ))
+            fig_cred.add_trace(go.Bar(
+                name="Bayesian", x=cred_df["Source"], y=cred_df["Bayesian Credibility"],
+                marker_color="#f97316",
+            ))
+            fig_cred.update_layout(
+                barmode="group", height=400,
+                yaxis_title="Credibility Score",
+                title="Static vs Bayesian Credibility by Source",
+            )
+            st.plotly_chart(fig_cred, use_container_width=True)
+
+            st.dataframe(cred_df, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.error(f"Error loading credibility data: {e}")
+
+    st.divider()
+
+    # --- Precision / Recall / F1 ---
+    st.markdown("### Precision / Recall / F1 by Source")
+    try:
+        eval_data = requests.get(f"{API_URL}/analytics/evaluation").json()
+        if eval_data:
+            eval_df = pd.DataFrame(eval_data)
+            display_cols = [c for c in [
+                "source_name", "true_positives", "false_positives", "total_reviewed",
+                "precision", "recall", "f1_score", "bayesian_credibility"
+            ] if c in eval_df.columns]
+            if display_cols:
+                st.dataframe(
+                    eval_df[display_cols].rename(columns={
+                        "source_name": "Source", "true_positives": "TP",
+                        "false_positives": "FP", "total_reviewed": "Reviewed",
+                        "precision": "Precision", "recall": "Recall",
+                        "f1_score": "F1 Score", "bayesian_credibility": "Bayesian Cred",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+
+                # Grouped bar chart for P/R/F1
+                if len(eval_df) > 0:
+                    fig_prf = go.Figure()
+                    fig_prf.add_trace(go.Bar(name="Precision", x=eval_df["source_name"], y=eval_df["precision"], marker_color="#22c55e"))
+                    fig_prf.add_trace(go.Bar(name="Recall", x=eval_df["source_name"], y=eval_df["recall"], marker_color="#3b82f6"))
+                    fig_prf.add_trace(go.Bar(name="F1", x=eval_df["source_name"], y=eval_df["f1_score"], marker_color="#f97316"))
+                    fig_prf.update_layout(barmode="group", height=400, title="Evaluation Metrics by Source")
+                    st.plotly_chart(fig_prf, use_container_width=True)
+        else:
+            st.info("No evaluation data yet. Classify alerts as TP/FP in the Alert Feed to generate metrics.")
+    except Exception as e:
+        st.error(f"Error loading evaluation data: {e}")
+
+    st.divider()
+
+    # --- Backtest Results ---
+    st.markdown("### Backtest: Full Scoring vs Baseline")
+    try:
+        backtest = requests.get(f"{API_URL}/analytics/backtest").json()
+        agg = backtest.get("aggregate", {})
+
+        bc1, bc2, bc3, bc4 = st.columns(4)
+        bc1.metric("Baseline Detection Rate", f"{agg.get('baseline_detection_rate', 0):.0%}")
+        bc2.metric("Full Model Detection Rate", f"{agg.get('full_detection_rate', 0):.0%}")
+        bc3.metric("Baseline Mean Score", f"{agg.get('baseline_mean_score', 0):.1f}")
+        bc4.metric("Full Mean Score", f"{agg.get('full_mean_score', 0):.1f}")
+
+        incidents = backtest.get("incidents", [])
+        if incidents:
+            bt_df = pd.DataFrame(incidents)
+            display_cols = [c for c in [
+                "incident", "expected_severity", "baseline_score", "baseline_severity",
+                "full_score", "full_severity", "score_improvement"
+            ] if c in bt_df.columns]
+            st.dataframe(
+                bt_df[display_cols].rename(columns={
+                    "incident": "Incident", "expected_severity": "Expected",
+                    "baseline_score": "Baseline Score", "baseline_severity": "Baseline Severity",
+                    "full_score": "Full Score", "full_severity": "Full Severity",
+                    "score_improvement": "Improvement",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+            # Chart: baseline vs full scores
+            fig_bt = go.Figure()
+            fig_bt.add_trace(go.Bar(
+                name="Baseline", x=bt_df["incident"], y=bt_df["baseline_score"],
+                marker_color="#94a3b8",
+            ))
+            fig_bt.add_trace(go.Bar(
+                name="Full Model", x=bt_df["incident"], y=bt_df["full_score"],
+                marker_color="#f97316",
+            ))
+            fig_bt.update_layout(
+                barmode="group", height=450,
+                title="Baseline vs Full Scoring Model — Golden Dataset",
+                yaxis_title="Risk Score",
+                xaxis_tickangle=-30,
+            )
+            st.plotly_chart(fig_bt, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Error loading backtest data: {e}")
+
+
+# ============================================================
+# TAB 6: PERFORMANCE
+# ============================================================
+with tab_perf:
+    st.subheader("Scraping Performance & Deduplication")
+
+    # --- Scrape Run History ---
+    st.markdown("### Scrape Run History")
+    try:
+        perf_data = requests.get(f"{API_URL}/analytics/performance", params={"limit": 20}).json()
+        if perf_data:
+            perf_df = pd.DataFrame(perf_data)
+            display_cols = [c for c in [
+                "started_at", "scraper_type", "total_alerts", "duration_seconds",
+                "alerts_per_second", "status"
+            ] if c in perf_df.columns]
+            st.dataframe(
+                perf_df[display_cols].rename(columns={
+                    "started_at": "Started", "scraper_type": "Scraper",
+                    "total_alerts": "Alerts", "duration_seconds": "Duration (s)",
+                    "alerts_per_second": "Alerts/sec", "status": "Status",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+            # Duration trend
+            if len(perf_df) > 1 and "duration_seconds" in perf_df.columns:
+                fig_dur = px.line(
+                    perf_df.sort_values("started_at"),
+                    x="started_at", y="duration_seconds",
+                    title="Scrape Duration Over Time",
+                    markers=True,
+                )
+                fig_dur.update_layout(height=350, xaxis_title="Run", yaxis_title="Duration (s)")
+                st.plotly_chart(fig_dur, use_container_width=True)
+
+            # Alerts per second trend
+            if len(perf_df) > 1 and "alerts_per_second" in perf_df.columns:
+                fig_aps = px.line(
+                    perf_df.sort_values("started_at"),
+                    x="started_at", y="alerts_per_second",
+                    title="Alerts per Second Over Time",
+                    markers=True,
+                    color_discrete_sequence=["#f97316"],
+                )
+                fig_aps.update_layout(height=350, xaxis_title="Run", yaxis_title="Alerts/sec")
+                st.plotly_chart(fig_aps, use_container_width=True)
+        else:
+            st.info("No scrape runs recorded yet. Run the scraper to generate performance data.")
+    except Exception as e:
+        st.error(f"Error loading performance data: {e}")
+
+    st.divider()
+
+    # --- Deduplication Stats ---
+    st.markdown("### Content Deduplication")
+    try:
+        dedup_data = requests.get(f"{API_URL}/analytics/duplicates").json()
+
+        dc1, dc2, dc3, dc4 = st.columns(4)
+        dc1.metric("Total Alerts", dedup_data.get("total_alerts", 0))
+        dc2.metric("Unique Alerts", dedup_data.get("unique_alerts", 0))
+        dc3.metric("Duplicates", dedup_data.get("duplicates", 0))
+        dc4.metric("Dedup Ratio", f"{dedup_data.get('dedup_ratio', 0):.1%}")
+
+        clusters = dedup_data.get("top_clusters", [])
+        if clusters:
+            st.markdown("**Top Duplicate Clusters:**")
+            cluster_df = pd.DataFrame(clusters)
+            display_cols = [c for c in ["title", "dup_count"] if c in cluster_df.columns]
+            st.dataframe(
+                cluster_df[display_cols].rename(columns={
+                    "title": "Original Alert", "dup_count": "Duplicate Count",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+    except Exception as e:
+        st.error(f"Error loading dedup data: {e}")
+
+
+# ============================================================
+# TAB 7: CONFIGURATION
 # ============================================================
 with tab_config:
     st.subheader("Configuration")
@@ -427,7 +688,12 @@ with tab_config:
             for src in sources:
                 sc1, sc2 = st.columns([3, 1])
                 cred = src.get("credibility_score", 0.5)
-                sc1.write(f"**{src['name']}** ({src['source_type']}) — Credibility: {cred:.2f}")
+                tp = src.get("true_positives", 0) or 0
+                fp = src.get("false_positives", 0) or 0
+                sc1.write(
+                    f"**{src['name']}** ({src['source_type']}) — "
+                    f"Credibility: {cred:.2f} | TP: {tp} | FP: {fp}"
+                )
                 sc2.write("")  # spacer
     except Exception:
         pass
@@ -436,7 +702,7 @@ with tab_config:
 
     # --- Rescore ---
     st.markdown("### Re-score Alerts")
-    st.write("Re-calculate risk scores for all unreviewed alerts using current keyword weights and source credibility.")
+    st.write("Re-calculate risk scores for all unreviewed alerts using current keyword weights, Bayesian credibility, and Z-score frequency factors.")
     if st.button("Re-score All Unreviewed Alerts"):
         try:
             result = requests.post(f"{API_URL}/alerts/rescore").json()

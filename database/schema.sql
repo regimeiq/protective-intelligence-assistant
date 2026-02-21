@@ -4,6 +4,10 @@ CREATE TABLE IF NOT EXISTS sources (
     url TEXT NOT NULL,
     source_type TEXT NOT NULL,
     credibility_score REAL DEFAULT 0.5,
+    true_positives INTEGER DEFAULT 0,
+    false_positives INTEGER DEFAULT 0,
+    bayesian_alpha REAL DEFAULT 2.0,
+    bayesian_beta REAL DEFAULT 2.0,
     active INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -25,6 +29,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     source_id INTEGER,
     keyword_id INTEGER,
     matched_term TEXT,
+    content_hash TEXT,
+    duplicate_of INTEGER,
     risk_score REAL DEFAULT 0.0,
     severity TEXT DEFAULT 'low',
     reviewed INTEGER DEFAULT 0,
@@ -50,6 +56,7 @@ CREATE TABLE IF NOT EXISTS alert_scores (
     keyword_weight REAL NOT NULL,
     source_credibility REAL NOT NULL,
     frequency_factor REAL DEFAULT 1.0,
+    z_score REAL DEFAULT 0.0,
     recency_factor REAL DEFAULT 1.0,
     final_score REAL NOT NULL,
     computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -77,4 +84,30 @@ CREATE TABLE IF NOT EXISTS intelligence_reports (
     critical_count INTEGER DEFAULT 0,
     high_count INTEGER DEFAULT 0,
     generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER,
+    period TEXT NOT NULL,
+    true_positives INTEGER DEFAULT 0,
+    false_positives INTEGER DEFAULT 0,
+    total_reviewed INTEGER DEFAULT 0,
+    precision REAL DEFAULT 0.0,
+    recall REAL DEFAULT 0.0,
+    f1_score REAL DEFAULT 0.0,
+    computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_id) REFERENCES sources(id)
+);
+
+CREATE TABLE IF NOT EXISTS scrape_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TIMESTAMP NOT NULL,
+    completed_at TIMESTAMP,
+    scraper_type TEXT,
+    total_sources INTEGER DEFAULT 0,
+    total_alerts INTEGER DEFAULT 0,
+    duration_seconds REAL DEFAULT 0.0,
+    alerts_per_second REAL DEFAULT 0.0,
+    status TEXT DEFAULT 'running'
 );

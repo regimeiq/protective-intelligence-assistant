@@ -28,7 +28,14 @@ def migrate_schema():
     migrations = [
         "ALTER TABLE keywords ADD COLUMN weight REAL DEFAULT 1.0",
         "ALTER TABLE sources ADD COLUMN credibility_score REAL DEFAULT 0.5",
+        "ALTER TABLE sources ADD COLUMN true_positives INTEGER DEFAULT 0",
+        "ALTER TABLE sources ADD COLUMN false_positives INTEGER DEFAULT 0",
+        "ALTER TABLE sources ADD COLUMN bayesian_alpha REAL DEFAULT 2.0",
+        "ALTER TABLE sources ADD COLUMN bayesian_beta REAL DEFAULT 2.0",
         "ALTER TABLE alerts ADD COLUMN risk_score REAL DEFAULT 0.0",
+        "ALTER TABLE alerts ADD COLUMN content_hash TEXT",
+        "ALTER TABLE alerts ADD COLUMN duplicate_of INTEGER",
+        "ALTER TABLE alert_scores ADD COLUMN z_score REAL DEFAULT 0.0",
         "ALTER TABLE threat_actors ADD COLUMN alert_count INTEGER DEFAULT 0",
     ]
     for sql in migrations:
@@ -36,6 +43,20 @@ def migrate_schema():
             conn.execute(sql)
         except sqlite3.OperationalError:
             pass  # Column already exists
+
+    # Indexes for performance
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_alerts_content_hash ON alerts(content_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_alerts_duplicate_of ON alerts(duplicate_of)",
+        "CREATE INDEX IF NOT EXISTS idx_alerts_created_date ON alerts(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_keyword_frequency_kw_date ON keyword_frequency(keyword_id, date)",
+    ]
+    for sql in indexes:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass
+
     conn.execute("UPDATE keywords SET weight = 1.0 WHERE weight IS NULL")
     conn.execute("UPDATE sources SET credibility_score = 0.5 WHERE credibility_score IS NULL")
     conn.execute("UPDATE alerts SET risk_score = 0.0 WHERE risk_score IS NULL")
