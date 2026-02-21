@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS keywords (
     term TEXT NOT NULL UNIQUE,
     category TEXT DEFAULT 'general',
     weight REAL DEFAULT 1.0,
+    weight_sigma REAL,
     active INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -81,6 +82,8 @@ CREATE TABLE IF NOT EXISTS intelligence_reports (
     emerging_themes TEXT,
     active_threat_actors TEXT,
     escalation_recommendations TEXT,
+    top_entities TEXT,
+    new_cves TEXT,
     total_alerts INTEGER DEFAULT 0,
     critical_count INTEGER DEFAULT 0,
     high_count INTEGER DEFAULT 0,
@@ -111,4 +114,52 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     duration_seconds REAL DEFAULT 0.0,
     alerts_per_second REAL DEFAULT 0.0,
     status TEXT DEFAULT 'running'
+);
+
+CREATE TABLE IF NOT EXISTS entities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    value TEXT NOT NULL,
+    UNIQUE(type, value)
+);
+
+CREATE TABLE IF NOT EXISTS alert_entities (
+    alert_id INTEGER NOT NULL,
+    entity_id INTEGER NOT NULL,
+    confidence REAL,
+    extractor TEXT NOT NULL,
+    context TEXT,
+    PRIMARY KEY(alert_id, entity_id),
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE,
+    FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS iocs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    value TEXT NOT NULL,
+    UNIQUE(type, value)
+);
+
+CREATE TABLE IF NOT EXISTS alert_iocs (
+    alert_id INTEGER NOT NULL,
+    ioc_id INTEGER NOT NULL,
+    extractor TEXT NOT NULL,
+    context TEXT,
+    PRIMARY KEY(alert_id, ioc_id),
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE,
+    FOREIGN KEY (ioc_id) REFERENCES iocs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS alert_score_intervals (
+    alert_id INTEGER PRIMARY KEY,
+    n INTEGER NOT NULL,
+    p05 REAL NOT NULL,
+    p50 REAL NOT NULL,
+    p95 REAL NOT NULL,
+    mean REAL NOT NULL,
+    std REAL NOT NULL,
+    computed_at TEXT NOT NULL,
+    method TEXT NOT NULL,
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
 );

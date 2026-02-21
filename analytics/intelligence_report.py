@@ -72,6 +72,36 @@ def generate_daily_report(report_date=None):
         (report_date, next_date),
     ).fetchall()
 
+    # --- Top entities (last 24h) ---
+    top_entities = conn.execute(
+        """SELECT e.type, e.value, COUNT(*) AS mention_count
+        FROM alert_entities ae
+        JOIN entities e ON e.id = ae.entity_id
+        JOIN alerts a ON a.id = ae.alert_id
+        WHERE COALESCE(a.published_at, a.created_at) >= ?
+          AND COALESCE(a.published_at, a.created_at) < ?
+          AND a.duplicate_of IS NULL
+        GROUP BY e.type, e.value
+        ORDER BY mention_count DESC
+        LIMIT 20""",
+        (report_date, next_date),
+    ).fetchall()
+
+    # --- New CVEs (last 24h) ---
+    new_cves = conn.execute(
+        """SELECT DISTINCT i.value
+        FROM alert_iocs ai
+        JOIN iocs i ON i.id = ai.ioc_id
+        JOIN alerts a ON a.id = ai.alert_id
+        WHERE i.type = 'cve'
+          AND COALESCE(a.published_at, a.created_at) >= ?
+          AND COALESCE(a.published_at, a.created_at) < ?
+          AND a.duplicate_of IS NULL
+        ORDER BY i.value DESC
+        LIMIT 20""",
+        (report_date, next_date),
+    ).fetchall()
+
     # --- Threat actor mentions (unique alerts only) ---
     actor_keywords = conn.execute(
         """SELECT k.term, COUNT(*) as count FROM alerts a
@@ -122,6 +152,8 @@ def generate_daily_report(report_date=None):
         "active_threat_actors": active_actors,
         "escalation_recommendations": escalations,
         "top_keywords": [dict(k) for k in top_keywords],
+        "top_entities": [dict(e) for e in top_entities],
+        "new_cves": [row["value"] for row in new_cves],
         "stats": {
             "total_alerts": total,
             "critical_count": critical_count,
@@ -135,15 +167,17 @@ def generate_daily_report(report_date=None):
     conn.execute(
         """INSERT INTO intelligence_reports
         (report_date, executive_summary, top_risks, emerging_themes,
-         active_threat_actors, escalation_recommendations, total_alerts,
-         critical_count, high_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         active_threat_actors, escalation_recommendations, top_entities,
+         new_cves, total_alerts, critical_count, high_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(report_date) DO UPDATE SET
             executive_summary = excluded.executive_summary,
             top_risks = excluded.top_risks,
             emerging_themes = excluded.emerging_themes,
             active_threat_actors = excluded.active_threat_actors,
             escalation_recommendations = excluded.escalation_recommendations,
+            top_entities = excluded.top_entities,
+            new_cves = excluded.new_cves,
             total_alerts = excluded.total_alerts,
             critical_count = excluded.critical_count,
             high_count = excluded.high_count,
@@ -155,6 +189,8 @@ def generate_daily_report(report_date=None):
             json.dumps(spikes),
             json.dumps(active_actors),
             json.dumps(escalations),
+            json.dumps([dict(e) for e in top_entities]),
+            json.dumps([row["value"] for row in new_cves]),
             total,
             critical_count,
             high_count,

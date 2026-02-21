@@ -121,7 +121,7 @@ Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandwo
                            │
                     ┌──────▼──────┐
                     │  SQLite DB  │  Alerts, scores, frequencies,
-                    │  (9 tables) │  threat actors, reports, metrics
+                    │ (14 tables) │  threat actors, reports, metrics
                     └──────┬──────┘
                            │
               ┌────────────┼────────────┐
@@ -129,7 +129,7 @@ Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandwo
        ┌──────▼──────┐  ┌─▼──────┐  ┌──▼───────────┐
        │  FastAPI     │  │ Intel  │  │  Streamlit   │
        │  REST API    │  │ Report │  │  Dashboard   │
-       │ (22 endpts)  │  │ Engine │  │  (7 tabs)    │
+       │ (27 endpts)  │  │ Engine │  │  (9 tabs)    │
        └─────────────┘  └────────┘  └──────────────┘
 ```
 
@@ -139,8 +139,8 @@ Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandwo
 |-------|------|
 | Scraping | Feedparser, BeautifulSoup, aiohttp (async) |
 | Analytics | Z-score, Bayesian Beta, SHA-256 dedup (Python stdlib + aiohttp) |
-| API | FastAPI (22 endpoints) |
-| Database | SQLite (9 tables) |
+| API | FastAPI (27 endpoints) |
+| Database | SQLite (14 tables) |
 | Dashboard | Streamlit + Plotly |
 | Container | Docker, docker-compose |
 | Language | Python 3.11+ |
@@ -151,6 +151,9 @@ Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandwo
 git clone https://github.com/YOUR_USERNAME/osint-threat-monitor.git
 cd osint-threat-monitor
 pip install -r requirements.txt
+
+# Optional: install spaCy small English model for NER (IOC regex works without this)
+python -m spacy download en_core_web_sm
 
 # Initialize database with sources, keywords, and threat actors
 python run.py init
@@ -185,6 +188,8 @@ The repo is configured for `black`, `isort`, and `ruff` via `pyproject.toml`.
 | GET | `/alerts` | Retrieve alerts (filter by severity, score, review status) |
 | GET | `/alerts/summary` | Aggregated metrics + avg risk score + spike count + dedup stats |
 | GET | `/alerts/{id}/score` | Score breakdown with Z-score and Bayesian credibility |
+| GET | `/alerts/{id}/entities` | Extracted entities for one alert |
+| GET | `/alerts/{id}/iocs` | Extracted IOCs for one alert |
 | PATCH | `/alerts/{id}/review` | Mark alert as reviewed |
 | PATCH | `/alerts/{id}/classify` | Classify TP/FP — updates Bayesian source credibility |
 | POST | `/alerts/rescore` | Re-score all unreviewed alerts |
@@ -193,6 +198,8 @@ The repo is configured for `black`, `isort`, and `ruff` via `pyproject.toml`.
 | GET | `/intelligence/reports/{date}` | Retrieve specific report |
 | GET | `/analytics/spikes` | Detect keyword frequency spikes (with Z-scores) |
 | GET | `/analytics/keyword-trend/{id}` | Keyword frequency over time |
+| GET | `/analytics/forecast/keyword/{id}` | 7-day keyword forecast + quality metrics |
+| GET | `/analytics/graph` | Link-analysis graph across sources/keywords/entities/IOCs |
 | GET | `/analytics/evaluation` | Precision/recall/F1 per source |
 | GET | `/analytics/performance` | Scraping run benchmarks (duration, alerts/sec) |
 | GET | `/analytics/backtest` | Run backtest against golden dataset |
@@ -204,6 +211,23 @@ The repo is configured for `black`, `isort`, and `ruff` via `pyproject.toml`.
 | GET | `/sources` | List sources with Bayesian credibility scores |
 | PATCH | `/sources/{id}/credibility` | Update source credibility |
 | GET | `/threat-actors` | List known threat actors |
+
+### Endpoint Examples
+
+```bash
+# Alert artifacts
+curl "http://localhost:8000/alerts/1/entities"
+curl "http://localhost:8000/alerts/1/iocs"
+
+# Score with Monte Carlo uncertainty interval
+curl "http://localhost:8000/alerts/1/score?uncertainty=1&n=500"
+
+# Forecast keyword frequency
+curl "http://localhost:8000/analytics/forecast/keyword/1?horizon=7"
+
+# Link-analysis graph
+curl "http://localhost:8000/analytics/graph?days=7&min_score=70&limit_alerts=500"
+```
 
 ## Repo Structure
 
@@ -223,10 +247,10 @@ osint-threat-monitor/
 ├── api/
 │   └── main.py                  # FastAPI REST API (22 endpoints)
 ├── dashboard/
-│   └── app.py                   # Streamlit dashboard (7 tabs)
+│   └── app.py                   # Streamlit dashboard (9 tabs)
 ├── database/
 │   ├── init_db.py               # DB init, migration, seeding
-│   └── schema.sql               # SQLite schema (9 tables)
+│   └── schema.sql               # SQLite schema (14 tables)
 ├── config/
 │   └── watchlist.yaml           # Reference keyword/source config
 ├── run.py                       # CLI entry point
@@ -253,10 +277,10 @@ osint-threat-monitor/
 ## Roadmap
 
 - [x] Multi-source scraping (RSS, Reddit, Pastebin)
-- [x] SQLite database with structured schema (9 tables)
+- [x] SQLite database with structured schema (14 tables)
 - [x] FastAPI REST API (22 endpoints)
 - [x] Keyword matching engine with regex boundaries
-- [x] Streamlit dashboard with interactive charts (7 tabs)
+- [x] Streamlit dashboard with interactive charts (9 tabs)
 - [x] Multi-factor risk scoring engine
 - [x] Z-score anomaly detection for frequency spikes
 - [x] Bayesian source credibility learning (Beta distribution)
@@ -272,7 +296,7 @@ osint-threat-monitor/
 - [ ] Dark web forum integration
 - [ ] PDF/CSV export for reporting
 - [ ] Email/Slack alerting on critical scores
-- [ ] NLP-based entity extraction
+- [x] NLP-based entity + IOC extraction (spaCy optional, regex fallback)
 - [ ] IOC feed integration (STIX/TAXII)
 
 ## License

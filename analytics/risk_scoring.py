@@ -184,6 +184,12 @@ def _parse_timestamp(value):
     return dt
 
 
+def _compute_recency_factor(published_at=None, created_at=None):
+    event_dt = _parse_timestamp(published_at) or _parse_timestamp(created_at) or datetime.utcnow()
+    recency_hours = (datetime.utcnow() - event_dt).total_seconds() / 3600.0
+    return max(0.1, 1.0 - (recency_hours / 168.0)), recency_hours
+
+
 def score_alert(
     conn,
     alert_id,
@@ -207,9 +213,9 @@ def score_alert(
     else:
         frequency_factor, z_score = get_frequency_factor(conn, keyword_id)
 
-    event_dt = _parse_timestamp(published_at) or _parse_timestamp(created_at) or datetime.utcnow()
-    recency_hours = (datetime.utcnow() - event_dt).total_seconds() / 3600.0
-    recency_factor = max(0.1, 1.0 - (recency_hours / 168.0))
+    recency_factor, recency_hours = _compute_recency_factor(
+        published_at=published_at, created_at=created_at
+    )
 
     risk_score, severity = compute_risk_score(
         keyword_weight, source_credibility, frequency_factor, recency_hours
@@ -234,6 +240,103 @@ def score_alert(
         ),
     )
     return risk_score
+
+
+def compute_uncertainty_for_alert(alert_id, n=500, seed=0, force=False):
+    """
+    Compute (and cache) Monte Carlo uncertainty interval for one alert score.
+    """
+    from analytics.uncertainty import score_distribution
+    from database.init_db import get_connection
+
+    conn = get_connection()
+    try:
+        cached = conn.execute(
+            "SELECT * FROM alert_score_intervals WHERE alert_id = ?",
+            (alert_id,),
+        ).fetchone()
+        if cached and not force:
+            computed_dt = _parse_timestamp(cached["computed_at"])
+            cache_fresh = computed_dt and (datetime.utcnow() - computed_dt) < timedelta(hours=6)
+            if cache_fresh and int(cached["n"]) == int(n):
+                return dict(cached)
+
+        row = conn.execute(
+            """SELECT a.id, a.keyword_id, a.source_id, a.created_at, a.published_at,
+                      k.weight, k.weight_sigma, s.bayesian_alpha, s.bayesian_beta
+            FROM alerts a
+            JOIN keywords k ON a.keyword_id = k.id
+            JOIN sources s ON a.source_id = s.id
+            WHERE a.id = ?""",
+            (alert_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("Alert not found")
+
+        latest_score = conn.execute(
+            """SELECT frequency_factor, recency_factor
+            FROM alert_scores WHERE alert_id = ?
+            ORDER BY computed_at DESC LIMIT 1""",
+            (alert_id,),
+        ).fetchone()
+        if latest_score:
+            freq_factor = latest_score["frequency_factor"]
+            recency_factor = latest_score["recency_factor"]
+        else:
+            freq_factor, _ = get_frequency_factor(conn, row["keyword_id"])
+            recency_factor, _ = _compute_recency_factor(
+                published_at=row["published_at"], created_at=row["created_at"]
+            )
+
+        keyword_weight = row["weight"] if row["weight"] is not None else 1.0
+        sigma_default = max(0.05, 0.2 * keyword_weight)
+        keyword_sigma = row["weight_sigma"] if row["weight_sigma"] is not None else sigma_default
+        alpha = row["bayesian_alpha"] if row["bayesian_alpha"] else 2.0
+        beta = row["bayesian_beta"] if row["bayesian_beta"] else 2.0
+
+        interval = score_distribution(
+            keyword_weight=keyword_weight,
+            keyword_sigma=keyword_sigma,
+            freq_factor=freq_factor,
+            recency_factor=recency_factor,
+            alpha=alpha,
+            beta=beta,
+            n=n,
+            seed=seed,
+        )
+
+        computed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            """INSERT INTO alert_score_intervals
+            (alert_id, n, p05, p50, p95, mean, std, computed_at, method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(alert_id) DO UPDATE SET
+                n = excluded.n,
+                p05 = excluded.p05,
+                p50 = excluded.p50,
+                p95 = excluded.p95,
+                mean = excluded.mean,
+                std = excluded.std,
+                computed_at = excluded.computed_at,
+                method = excluded.method""",
+            (
+                alert_id,
+                interval["n"],
+                interval["p05"],
+                interval["p50"],
+                interval["p95"],
+                interval["mean"],
+                interval["std"],
+                computed_at,
+                interval["method"],
+            ),
+        )
+        conn.commit()
+
+        interval["computed_at"] = computed_at
+        return interval
+    finally:
+        conn.close()
 
 
 def rescore_all_alerts(conn):
