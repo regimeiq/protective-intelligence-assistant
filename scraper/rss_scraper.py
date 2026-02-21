@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from database.init_db import get_connection
 from analytics.risk_scoring import increment_keyword_frequency, score_alert
+from analytics.dedup import check_duplicate
 
 
 def fetch_rss_feed(url):
@@ -55,6 +56,7 @@ def run_rss_scraper():
     keywords = get_active_keywords(conn)
     sources = get_active_sources(conn, "rss")
     new_alerts = 0
+    duplicates = 0
 
     for source in sources:
         print(f"Scraping: {source['name']}")
@@ -66,10 +68,14 @@ def run_rss_scraper():
 
             for keyword in matches:
                 if not alert_exists(conn, source["id"], keyword["id"], entry["url"]):
+                    content_hash, duplicate_of = check_duplicate(
+                        conn, entry["title"], entry["content"]
+                    )
                     conn.execute(
                         """INSERT INTO alerts
-                           (source_id, keyword_id, title, content, url, matched_term, severity)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                           (source_id, keyword_id, title, content, url, matched_term,
+                            content_hash, duplicate_of, severity)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             source["id"],
                             keyword["id"],
@@ -77,19 +83,26 @@ def run_rss_scraper():
                             entry["content"][:2000],
                             entry["url"],
                             keyword["term"],
+                            content_hash,
+                            duplicate_of,
                             "low",
                         ),
                     )
                     alert_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    increment_keyword_frequency(conn, keyword["id"])
-                    risk_score = score_alert(
-                        conn, alert_id, keyword["id"], source["id"]
-                    )
-                    new_alerts += 1
+
+                    if duplicate_of is None:
+                        # Only score and count unique alerts
+                        increment_keyword_frequency(conn, keyword["id"])
+                        score_alert(
+                            conn, alert_id, keyword["id"], source["id"]
+                        )
+                        new_alerts += 1
+                    else:
+                        duplicates += 1
 
     conn.commit()
     conn.close()
-    print(f"RSS scrape complete. {new_alerts} new alerts.")
+    print(f"RSS scrape complete. {new_alerts} new alerts, {duplicates} duplicates skipped.")
     return new_alerts
 
 

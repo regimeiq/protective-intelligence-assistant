@@ -1,7 +1,12 @@
 """
 Risk Scoring Engine for OSINT Threat Monitor.
 
-Formula: risk_score = (keyword_weight * frequency_factor * source_credibility * 20) + recency_bonus
+Statistical approach:
+- Z-score anomaly detection for keyword frequency spikes
+- Bayesian credibility updating for source trustworthiness
+- Multi-factor scoring with audit trail
+
+Formula: risk_score = (keyword_weight * z_score_factor * bayesian_credibility * 20) + recency_bonus
 Clamped to 0-100 range.
 
 Severity derivation:
@@ -11,7 +16,6 @@ Severity derivation:
   0-39   = low
 """
 
-import sqlite3
 from datetime import datetime, timedelta
 
 
@@ -21,14 +25,14 @@ def compute_risk_score(keyword_weight, source_credibility, frequency_factor, rec
 
     Args:
         keyword_weight: Weight of the matched keyword (0.1-5.0)
-        source_credibility: Credibility of the source (0.0-1.0)
-        frequency_factor: Spike multiplier (1.0 = normal, >1.0 = spiking)
+        source_credibility: Bayesian credibility of the source (0.0-1.0)
+        frequency_factor: Z-score-derived multiplier (1.0-4.0)
         recency_hours: Hours since the alert was created
 
     Returns:
         (risk_score, severity) tuple
     """
-    recency_factor = max(0.1, 1.0 - (recency_hours / 168.0))  # decays over 7 days
+    recency_factor = max(0.1, 1.0 - (recency_hours / 168.0))
     raw_score = (keyword_weight * frequency_factor * source_credibility * 20.0) + (recency_factor * 10.0)
     risk_score = round(min(100.0, max(0.0, raw_score)), 1)
     severity = score_to_severity(risk_score)
@@ -55,17 +59,39 @@ def get_keyword_weight(conn, keyword_id):
 
 
 def get_source_credibility(conn, source_id):
-    """Fetch source credibility from database, defaulting to 0.5."""
+    """
+    Bayesian credibility using Beta distribution.
+    credibility = alpha / (alpha + beta)
+    Falls back to static credibility_score if no TP/FP data exists.
+    """
     row = conn.execute(
-        "SELECT credibility_score FROM sources WHERE id = ?", (source_id,)
+        """SELECT credibility_score, bayesian_alpha, bayesian_beta,
+                  true_positives, false_positives
+           FROM sources WHERE id = ?""",
+        (source_id,),
     ).fetchone()
-    return row["credibility_score"] if row and row["credibility_score"] else 0.5
+    if not row:
+        return 0.5
+
+    alpha = row["bayesian_alpha"] if row["bayesian_alpha"] else 2.0
+    beta = row["bayesian_beta"] if row["bayesian_beta"] else 2.0
+
+    # If no TP/FP classifications yet, use static score
+    if (row["true_positives"] or 0) == 0 and (row["false_positives"] or 0) == 0:
+        return row["credibility_score"] if row["credibility_score"] else 0.5
+
+    return round(alpha / (alpha + beta), 4)
 
 
 def get_frequency_factor(conn, keyword_id):
     """
-    Compare today's keyword match count to 7-day rolling average.
-    Returns a multiplier >= 1.0 if spiking.
+    Z-score based frequency factor.
+    z = (today_count - mean_7d) / std_dev_7d
+    Maps z-score to a multiplier 1.0-4.0.
+    Falls back to simple ratio when < 3 days of data.
+
+    Returns:
+        (frequency_factor, z_score) tuple
     """
     today = datetime.utcnow().strftime("%Y-%m-%d")
     today_row = conn.execute(
@@ -75,18 +101,39 @@ def get_frequency_factor(conn, keyword_id):
     today_count = today_row["count"] if today_row else 0
 
     seven_days_ago = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
-    avg_row = conn.execute(
-        """SELECT AVG(count) as avg_count FROM keyword_frequency
+    rows = conn.execute(
+        """SELECT count FROM keyword_frequency
         WHERE keyword_id = ? AND date >= ? AND date < ?""",
         (keyword_id, seven_days_ago, today),
-    ).fetchone()
-    avg_count = avg_row["avg_count"] if avg_row and avg_row["avg_count"] else 1.0
+    ).fetchall()
 
-    if avg_count < 1.0:
-        avg_count = 1.0
+    counts = [row["count"] for row in rows]
 
-    factor = today_count / avg_count
-    return max(1.0, round(factor, 2))
+    if len(counts) < 3:
+        # Fallback to simple ratio for insufficient data
+        avg = sum(counts) / len(counts) if counts else 1.0
+        avg = max(avg, 1.0)
+        ratio = today_count / avg
+        return max(1.0, round(ratio, 2)), 0.0
+
+    mean = sum(counts) / len(counts)
+    variance = sum((c - mean) ** 2 for c in counts) / len(counts)
+    std_dev = variance ** 0.5
+
+    if std_dev < 0.5:
+        std_dev = 0.5  # Floor to prevent division-by-near-zero
+
+    z_score = (today_count - mean) / std_dev
+
+    # Map z-score to multiplier: 1.0 at z<=0, 4.0 at z>=4
+    if z_score <= 0:
+        factor = 1.0
+    elif z_score >= 4.0:
+        factor = 4.0
+    else:
+        factor = round(1.0 + (z_score * 0.75), 2)
+
+    return factor, round(z_score, 2)
 
 
 def increment_keyword_frequency(conn, keyword_id):
@@ -109,7 +156,7 @@ def score_alert(conn, alert_id, keyword_id, source_id, created_at=None):
     """
     keyword_weight = get_keyword_weight(conn, keyword_id)
     source_credibility = get_source_credibility(conn, source_id)
-    frequency_factor = get_frequency_factor(conn, keyword_id)
+    frequency_factor, z_score = get_frequency_factor(conn, keyword_id)
 
     if created_at:
         try:
@@ -132,17 +179,17 @@ def score_alert(conn, alert_id, keyword_id, source_id, created_at=None):
     )
     conn.execute(
         """INSERT INTO alert_scores
-        (alert_id, keyword_weight, source_credibility, frequency_factor, recency_factor, final_score)
-        VALUES (?, ?, ?, ?, ?, ?)""",
-        (alert_id, keyword_weight, source_credibility, frequency_factor, recency_factor, risk_score),
+        (alert_id, keyword_weight, source_credibility, frequency_factor, z_score, recency_factor, final_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (alert_id, keyword_weight, source_credibility, frequency_factor, z_score, recency_factor, risk_score),
     )
     return risk_score
 
 
 def rescore_all_alerts(conn):
     """
-    Re-score all unreviewed alerts. Useful for periodic recalculation
-    as recency and frequency factors change over time.
+    Re-score all unreviewed alerts with current weights, Bayesian credibility,
+    and Z-score frequency factors.
     Returns count of alerts rescored.
     """
     alerts = conn.execute(
@@ -158,3 +205,90 @@ def rescore_all_alerts(conn):
         count += 1
     conn.commit()
     return count
+
+
+def update_source_credibility_bayesian(conn, source_id, is_true_positive):
+    """
+    Update Bayesian credibility when an alert is classified as TP or FP.
+    Uses Beta distribution: credibility = alpha / (alpha + beta).
+    """
+    if is_true_positive:
+        conn.execute(
+            """UPDATE sources SET
+                true_positives = COALESCE(true_positives, 0) + 1,
+                bayesian_alpha = COALESCE(bayesian_alpha, 2.0) + 1
+            WHERE id = ?""",
+            (source_id,),
+        )
+    else:
+        conn.execute(
+            """UPDATE sources SET
+                false_positives = COALESCE(false_positives, 0) + 1,
+                bayesian_beta = COALESCE(bayesian_beta, 2.0) + 1
+            WHERE id = ?""",
+            (source_id,),
+        )
+    # Sync the credibility_score column with Bayesian estimate
+    row = conn.execute(
+        "SELECT bayesian_alpha, bayesian_beta FROM sources WHERE id = ?",
+        (source_id,),
+    ).fetchone()
+    if row:
+        new_cred = row["bayesian_alpha"] / (row["bayesian_alpha"] + row["bayesian_beta"])
+        conn.execute(
+            "UPDATE sources SET credibility_score = ? WHERE id = ?",
+            (round(new_cred, 4), source_id),
+        )
+
+
+def compute_evaluation_metrics(conn, source_id=None):
+    """
+    Compute precision, recall, and F1 for each source.
+    Precision = TP / (TP + FP)
+    Recall = TP / (TP + FN) where FN ~ reviewed but unclassified
+    """
+    if source_id:
+        sources = [conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()]
+    else:
+        sources = conn.execute("SELECT * FROM sources").fetchall()
+
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    results = []
+    for src in sources:
+        tp = src["true_positives"] or 0
+        fp = src["false_positives"] or 0
+        reviewed_count = conn.execute(
+            "SELECT COUNT(*) as count FROM alerts WHERE source_id = ? AND reviewed = 1",
+            (src["id"],),
+        ).fetchone()["count"]
+
+        fn = max(0, reviewed_count - (tp + fp))
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+        alpha = src["bayesian_alpha"] or 2.0
+        beta = src["bayesian_beta"] or 2.0
+
+        results.append({
+            "source_id": src["id"],
+            "source_name": src["name"],
+            "true_positives": tp,
+            "false_positives": fp,
+            "total_reviewed": reviewed_count,
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1_score": round(f1, 4),
+            "bayesian_credibility": round(alpha / (alpha + beta), 4),
+            "static_credibility": src["credibility_score"] or 0.5,
+        })
+
+        conn.execute(
+            """INSERT INTO evaluation_metrics
+            (source_id, period, true_positives, false_positives, total_reviewed, precision, recall, f1_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (src["id"], today, tp, fp, reviewed_count, precision, recall, f1),
+        )
+
+    conn.commit()
+    return results

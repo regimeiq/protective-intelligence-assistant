@@ -13,8 +13,8 @@ from database.init_db import (
 
 app = FastAPI(
     title="OSINT Threat Monitor API",
-    description="Protective Intelligence REST API for threat prioritization, risk scoring, and analytical reporting",
-    version="2.0.0",
+    description="Protective Intelligence REST API — quantitative risk scoring, Bayesian credibility, Z-score anomaly detection, and structured analytical reporting",
+    version="3.0.0",
 )
 
 
@@ -24,6 +24,10 @@ class KeywordCreate(BaseModel):
     term: str
     category: str = "general"
     weight: float = 1.0
+
+
+class ClassifyRequest(BaseModel):
+    classification: str  # "true_positive" or "false_positive"
 
 
 class AlertResponse(BaseModel):
@@ -52,7 +56,7 @@ def startup():
 
 @app.get("/")
 def root():
-    return {"status": "online", "service": "OSINT Threat Monitor", "version": "2.0.0"}
+    return {"status": "online", "service": "OSINT Threat Monitor", "version": "3.0.0"}
 
 
 # --- ALERTS ---
@@ -69,7 +73,7 @@ def get_alerts(
     conn = get_connection()
     query = """
         SELECT a.id, a.title, a.content, a.url, a.risk_score, a.severity,
-               a.reviewed, a.created_at,
+               a.reviewed, a.created_at, a.content_hash, a.duplicate_of,
                s.name as source_name, k.term as matched_term
         FROM alerts a
         LEFT JOIN sources s ON a.source_id = s.id
@@ -100,24 +104,29 @@ def get_alerts(
 def get_alerts_summary():
     conn = get_connection()
     total = conn.execute("SELECT COUNT(*) as count FROM alerts").fetchone()["count"]
+    unique = conn.execute(
+        "SELECT COUNT(*) as count FROM alerts WHERE duplicate_of IS NULL"
+    ).fetchone()["count"]
     by_severity = conn.execute(
-        "SELECT severity, COUNT(*) as count FROM alerts GROUP BY severity"
+        "SELECT severity, COUNT(*) as count FROM alerts WHERE duplicate_of IS NULL GROUP BY severity"
     ).fetchall()
     by_source = conn.execute(
         """SELECT s.name, COUNT(*) as count FROM alerts a
         JOIN sources s ON a.source_id = s.id
+        WHERE a.duplicate_of IS NULL
         GROUP BY s.name ORDER BY count DESC"""
     ).fetchall()
     top_keywords = conn.execute(
         """SELECT k.term, COUNT(*) as count FROM alerts a
         JOIN keywords k ON a.keyword_id = k.id
+        WHERE a.duplicate_of IS NULL
         GROUP BY k.term ORDER BY count DESC LIMIT 10"""
     ).fetchall()
     unreviewed = conn.execute(
-        "SELECT COUNT(*) as count FROM alerts WHERE reviewed = 0"
+        "SELECT COUNT(*) as count FROM alerts WHERE reviewed = 0 AND duplicate_of IS NULL"
     ).fetchone()["count"]
     avg_score_row = conn.execute(
-        "SELECT AVG(risk_score) as avg FROM alerts WHERE reviewed = 0"
+        "SELECT AVG(risk_score) as avg FROM alerts WHERE reviewed = 0 AND duplicate_of IS NULL"
     ).fetchone()
     avg_risk_score = round(avg_score_row["avg"], 1) if avg_score_row["avg"] else 0.0
 
@@ -125,9 +134,14 @@ def get_alerts_summary():
     from analytics.spike_detection import detect_spikes
     active_spikes = len(detect_spikes(threshold=2.0))
 
+    # Duplicate stats
+    duplicates = total - unique
+
     conn.close()
     return {
         "total_alerts": total,
+        "unique_alerts": unique,
+        "duplicates": duplicates,
         "unreviewed": unreviewed,
         "avg_risk_score": avg_risk_score,
         "active_spikes": active_spikes,
@@ -149,6 +163,57 @@ def mark_reviewed(alert_id: int):
     conn.commit()
     conn.close()
     return {"status": "reviewed", "alert_id": alert_id}
+
+
+@app.patch("/alerts/{alert_id}/classify")
+def classify_alert(alert_id: int, body: ClassifyRequest):
+    """
+    Classify an alert as true_positive or false_positive.
+    Updates the source's Bayesian credibility (alpha/beta).
+    """
+    from analytics.risk_scoring import update_source_credibility_bayesian
+
+    if body.classification not in ("true_positive", "false_positive"):
+        raise HTTPException(
+            status_code=400,
+            detail="classification must be 'true_positive' or 'false_positive'",
+        )
+
+    conn = get_connection()
+    alert = conn.execute(
+        "SELECT source_id FROM alerts WHERE id = ?", (alert_id,)
+    ).fetchone()
+    if not alert:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    # Mark as reviewed
+    conn.execute("UPDATE alerts SET reviewed = 1 WHERE id = ?", (alert_id,))
+
+    # Update Bayesian credibility
+    is_tp = body.classification == "true_positive"
+    update_source_credibility_bayesian(conn, alert["source_id"], is_tp)
+
+    conn.commit()
+
+    # Return updated source credibility
+    source = conn.execute(
+        "SELECT name, credibility_score, bayesian_alpha, bayesian_beta, true_positives, false_positives FROM sources WHERE id = ?",
+        (alert["source_id"],),
+    ).fetchone()
+    conn.close()
+
+    return {
+        "status": "classified",
+        "alert_id": alert_id,
+        "classification": body.classification,
+        "source_name": source["name"],
+        "updated_credibility": source["credibility_score"],
+        "bayesian_alpha": source["bayesian_alpha"],
+        "bayesian_beta": source["bayesian_beta"],
+        "true_positives": source["true_positives"],
+        "false_positives": source["false_positives"],
+    }
 
 
 @app.get("/alerts/{alert_id}/score")
@@ -223,7 +288,7 @@ def get_report(report_date: str):
 
 @app.get("/analytics/spikes")
 def get_spikes(threshold: float = Query(default=2.0, ge=1.0)):
-    """Get keywords with unusual frequency spikes."""
+    """Get keywords with unusual frequency spikes (includes Z-score)."""
     from analytics.spike_detection import detect_spikes
     return detect_spikes(threshold=threshold)
 
@@ -233,6 +298,72 @@ def get_keyword_trend_endpoint(keyword_id: int, days: int = Query(default=14, le
     """Get daily frequency trend for a specific keyword."""
     from analytics.spike_detection import get_keyword_trend
     return get_keyword_trend(keyword_id, days=days)
+
+
+@app.get("/analytics/evaluation")
+def get_evaluation_metrics(source_id: Optional[int] = None):
+    """
+    Compute and return precision/recall/F1 per source.
+    Based on TP/FP classifications from alert reviews.
+    """
+    from analytics.risk_scoring import compute_evaluation_metrics
+    conn = get_connection()
+    results = compute_evaluation_metrics(conn, source_id=source_id)
+    conn.close()
+    return results
+
+
+@app.get("/analytics/performance")
+def get_performance_metrics(limit: int = Query(default=20, le=100)):
+    """Get recent scraping performance benchmarks."""
+    conn = get_connection()
+    runs = conn.execute(
+        """SELECT * FROM scrape_runs
+        ORDER BY started_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in runs]
+
+
+@app.get("/analytics/backtest")
+def run_backtest():
+    """
+    Run scoring model backtest against golden dataset of known incidents.
+    Compares multi-factor scoring vs naive baseline.
+    """
+    from analytics.backtesting import run_backtest
+    return run_backtest()
+
+
+@app.get("/analytics/duplicates")
+def get_duplicate_stats():
+    """Get content deduplication statistics."""
+    conn = get_connection()
+    total = conn.execute("SELECT COUNT(*) as count FROM alerts").fetchone()["count"]
+    unique = conn.execute(
+        "SELECT COUNT(*) as count FROM alerts WHERE duplicate_of IS NULL"
+    ).fetchone()["count"]
+    duplicates = total - unique
+
+    # Top duplicate clusters (original alerts with most duplicates)
+    clusters = conn.execute(
+        """SELECT a.id, a.title, a.content_hash, COUNT(d.id) as dup_count
+        FROM alerts a
+        JOIN alerts d ON d.duplicate_of = a.id
+        GROUP BY a.id
+        ORDER BY dup_count DESC
+        LIMIT 10"""
+    ).fetchall()
+
+    conn.close()
+    return {
+        "total_alerts": total,
+        "unique_alerts": unique,
+        "duplicates": duplicates,
+        "dedup_ratio": round(duplicates / total, 4) if total > 0 else 0.0,
+        "top_clusters": [dict(c) for c in clusters],
+    }
 
 
 # --- KEYWORDS ---

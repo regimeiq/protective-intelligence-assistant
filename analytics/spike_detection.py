@@ -1,6 +1,6 @@
 """
 Spike detection for keyword frequency trends.
-Identifies keywords with unusual activity levels.
+Identifies keywords with unusual activity levels using Z-score analysis.
 """
 
 from datetime import datetime, timedelta
@@ -10,13 +10,14 @@ from database.init_db import get_connection
 def detect_spikes(threshold=2.0):
     """
     Find keywords whose today count exceeds their 7-day average
-    by the given threshold multiplier.
+    by the given threshold multiplier. Includes Z-score for statistical context.
 
     Args:
         threshold: Minimum ratio of today/average to qualify as a spike (default 2.0)
 
     Returns:
-        List of dicts with keyword info and spike details, sorted by spike_ratio descending.
+        List of dicts with keyword info, spike details, and z-score,
+        sorted by spike_ratio descending.
     """
     conn = get_connection()
     today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -32,13 +33,26 @@ def detect_spikes(threshold=2.0):
         WHERE kf.date = ?""",
         (seven_days_ago, today, today),
     ).fetchall()
-    conn.close()
 
     spikes = []
     for row in rows:
         avg = row["avg_count"] if row["avg_count"] and row["avg_count"] > 0 else 1.0
         ratio = row["today_count"] / avg
         if ratio >= threshold:
+            # Compute z-score for statistical context
+            counts_rows = conn.execute(
+                """SELECT count FROM keyword_frequency
+                WHERE keyword_id = ? AND date >= ? AND date < ?""",
+                (row["keyword_id"], seven_days_ago, today),
+            ).fetchall()
+            counts = [r["count"] for r in counts_rows]
+            z_score = 0.0
+            if len(counts) >= 3:
+                mean = sum(counts) / len(counts)
+                variance = sum((c - mean) ** 2 for c in counts) / len(counts)
+                std_dev = max(variance ** 0.5, 0.5)
+                z_score = round((row["today_count"] - mean) / std_dev, 2)
+
             spikes.append({
                 "keyword_id": row["keyword_id"],
                 "term": row["term"],
@@ -46,7 +60,10 @@ def detect_spikes(threshold=2.0):
                 "today_count": row["today_count"],
                 "avg_7d": round(avg, 1),
                 "spike_ratio": round(ratio, 1),
+                "z_score": z_score,
             })
+
+    conn.close()
     spikes.sort(key=lambda x: x["spike_ratio"], reverse=True)
     return spikes
 

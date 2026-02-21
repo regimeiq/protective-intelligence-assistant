@@ -30,7 +30,7 @@ def generate_daily_report(report_date=None):
         datetime.strptime(report_date, "%Y-%m-%d") + timedelta(days=1)
     ).strftime("%Y-%m-%d")
 
-    # --- Top risks: highest scored alerts from the period ---
+    # --- Top risks: highest scored unique alerts from the period ---
     top_alerts = conn.execute(
         """SELECT a.id, a.title, a.risk_score, a.severity, a.matched_term,
            s.name as source_name, k.term as keyword, k.category
@@ -38,15 +38,17 @@ def generate_daily_report(report_date=None):
         LEFT JOIN sources s ON a.source_id = s.id
         LEFT JOIN keywords k ON a.keyword_id = k.id
         WHERE a.created_at >= ? AND a.created_at < ?
+        AND a.duplicate_of IS NULL
         ORDER BY a.risk_score DESC
         LIMIT 10""",
         (report_date, next_date),
     ).fetchall()
 
-    # --- Counts by severity ---
+    # --- Counts by severity (unique alerts only) ---
     severity_counts = conn.execute(
         """SELECT severity, COUNT(*) as count FROM alerts
         WHERE created_at >= ? AND created_at < ?
+        AND duplicate_of IS NULL
         GROUP BY severity""",
         (report_date, next_date),
     ).fetchall()
@@ -56,24 +58,26 @@ def generate_daily_report(report_date=None):
     # --- Emerging themes (spiking keywords) ---
     spikes = detect_spikes(threshold=1.5)
 
-    # --- Most mentioned keywords ---
+    # --- Most mentioned keywords (unique alerts only) ---
     top_keywords = conn.execute(
         """SELECT k.term, k.category, COUNT(*) as mention_count
         FROM alerts a
         JOIN keywords k ON a.keyword_id = k.id
         WHERE a.created_at >= ? AND a.created_at < ?
+        AND a.duplicate_of IS NULL
         GROUP BY k.id
         ORDER BY mention_count DESC
         LIMIT 5""",
         (report_date, next_date),
     ).fetchall()
 
-    # --- Threat actor mentions ---
+    # --- Threat actor mentions (unique alerts only) ---
     actor_keywords = conn.execute(
         """SELECT k.term, COUNT(*) as count FROM alerts a
         JOIN keywords k ON a.keyword_id = k.id
         WHERE k.category = 'threat_actor'
         AND a.created_at >= ? AND a.created_at < ?
+        AND a.duplicate_of IS NULL
         GROUP BY k.term ORDER BY count DESC""",
         (report_date, next_date),
     ).fetchall()
