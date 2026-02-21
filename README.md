@@ -69,7 +69,7 @@ Duplicates are stored with `duplicate_of` references but excluded from scoring, 
 
 ### Async Ingestion
 
-HTTP fetches use `aiohttp` for concurrent source collection. RSS and Reddit feeds are fetched in parallel; Pastebin stays sequential (rate-limited). Falls back to synchronous mode if aiohttp is unavailable. Performance metrics (duration, alerts/sec) are recorded per run.
+HTTP fetches use `aiohttp` for concurrent source collection. RSS and Reddit feeds are fetched in parallel; Pastebin stays sequential (rate-limited). If async fetch fails for a specific RSS source, the scraper attempts a sync fallback for that source. Falls back to full synchronous mode if aiohttp is unavailable. Performance metrics (duration, alerts/sec) are recorded per run.
 
 ### Backtesting Framework
 
@@ -91,6 +91,21 @@ Automated structured analytical output including:
 ### Threat Actor Correlation
 
 Maintains a database of known threat actors (APT28, APT29, Lazarus Group, Sandworm, LockBit, BlackCat, etc.) and cross-references alert keyword matches to identify relevant actor activity.
+
+### POI Watchlist (v0)
+
+Person-of-interest monitoring uses the existing `keywords` table with category `poi`:
+- one alias per keyword row
+- higher default seed weight for `poi` terms (`4.0`)
+- configurable via `config/watchlist.yaml` and the dashboard Configuration tab
+
+### Regex IOC Entity Extraction
+
+Regex-based IOC extraction runs on alert title+content and stores artifacts in `alert_entities`:
+- `ipv4`, `domain`, `url`, `cve`, `md5`, `sha1`, `sha256`
+- unique per `(alert_id, entity_type, entity_value)`
+
+Artifacts are exposed through `/alerts/{id}/entities` and displayed in the alert detail view.
 
 ## Example Scenario
 
@@ -183,6 +198,9 @@ sources:
   rss:
     - name: "Source Name"
       url: "https://example.com/feed.xml"
+    - name: "GDELT PI/EP Watch"
+      gdelt_query: '("threat to CEO" OR swatting) AND (executive OR CEO)'
+      credibility_score: 0.6
   reddit:
     - name: "r/example"
       url: "https://www.reddit.com/r/example/.rss"
@@ -191,12 +209,16 @@ sources:
       url: "https://pastebin.com/archive"
 
 keywords:
-  threat_actors:
+  threat_actor:
     - "APT29"
+  poi:
+    - "Jane Doe"
+    - term: "J. Doe"
+      weight: 4.0
   protective_intel:
     - term: "death threat"
       weight: 5.0
-  vulnerabilities:
+  vulnerability:
     - "CVE"
   malware:
     - "ransomware"
@@ -205,7 +227,7 @@ keywords:
 ```
 
 Keyword entries accept either a string or an object with `term` and optional `weight`.
-If `weight` is omitted, seeding uses `1.0`.
+If `weight` is omitted, seeding uses `1.0` by default (`poi` defaults to `4.0`).
 
 ## Code Quality
 
@@ -224,8 +246,8 @@ The repo is configured for `black`, `isort`, and `ruff` via `pyproject.toml`.
 | GET | `/alerts` | Retrieve alerts (filter by severity, score, review status) |
 | GET | `/alerts/summary` | Aggregated metrics + avg risk score + spike count + dedup stats |
 | GET | `/alerts/{id}/score` | Score breakdown with Z-score and Bayesian credibility |
-| GET | `/alerts/{id}/entities` | Extracted entities for one alert |
-| GET | `/alerts/{id}/iocs` | Extracted IOCs for one alert |
+| GET | `/alerts/{id}/entities` | Regex IOC entities for one alert (`entity_type`, `entity_value`) |
+| GET | `/alerts/{id}/iocs` | IOC convenience view derived from `alert_entities` |
 | PATCH | `/alerts/{id}/review` | Mark alert as reviewed |
 | PATCH | `/alerts/{id}/classify` | Classify TP/FP — updates Bayesian source credibility |
 | POST | `/alerts/rescore` | Re-score all unreviewed alerts |
@@ -273,6 +295,7 @@ osint-threat-monitor/
 │   ├── risk_scoring.py          # Z-score + Bayesian multi-factor scoring engine
 │   ├── spike_detection.py       # Z-score keyword frequency spike detection
 │   ├── intelligence_report.py   # Daily intelligence report generator
+│   ├── entity_extraction.py     # Regex IOC extraction + storage
 │   ├── dedup.py                 # SHA-256 + fuzzy content deduplication
 │   └── backtesting.py           # Golden dataset backtesting framework
 ├── scraper/
@@ -281,7 +304,7 @@ osint-threat-monitor/
 │   ├── reddit_scraper.py        # Reddit threat community scraper
 │   └── pastebin_monitor.py      # Pastebin archive monitor
 ├── api/
-│   └── main.py                  # FastAPI REST API (22 endpoints)
+│   └── main.py                  # FastAPI REST API (27 endpoints)
 ├── dashboard/
 │   └── app.py                   # Streamlit dashboard (9 tabs)
 ├── database/
@@ -303,18 +326,23 @@ osint-threat-monitor/
 | `sources` | Intelligence sources with Bayesian credibility (alpha/beta/TP/FP) |
 | `keywords` | Watchlist terms with threat weights |
 | `alerts` | Matched threat alerts with risk scores and content hashes |
-| `alert_scores` | Score audit trail (weight breakdown + Z-score per alert) |
+| `alert_scores` | Score audit trail (weight breakdown + Z-score + Monte Carlo stats per alert) |
 | `keyword_frequency` | Daily keyword match counts (for Z-score spike detection) |
 | `intelligence_reports` | Persisted daily analytical summaries |
 | `threat_actors` | Known threat actor profiles |
 | `evaluation_metrics` | Per-source precision/recall/F1 over time |
 | `scrape_runs` | Scraping performance benchmarks (duration, alerts/sec) |
+| `alert_entities` | Regex IOC entities linked to alerts |
+| `entities` | Legacy normalized entity store (retained for compatibility) |
+| `iocs` | Legacy normalized IOC store (retained for compatibility) |
+| `alert_iocs` | Legacy alert-IOC links (retained for compatibility) |
+| `alert_score_intervals` | On-demand uncertainty interval cache |
 
 ## Roadmap
 
 - [x] Multi-source scraping (RSS, Reddit, Pastebin)
 - [x] SQLite database with structured schema (14 tables)
-- [x] FastAPI REST API (22 endpoints)
+- [x] FastAPI REST API (27 endpoints)
 - [x] Keyword matching engine with regex boundaries
 - [x] Streamlit dashboard with interactive charts (9 tabs)
 - [x] Multi-factor risk scoring engine
@@ -332,7 +360,7 @@ osint-threat-monitor/
 - [ ] Dark web forum integration
 - [ ] PDF/CSV export for reporting
 - [ ] Email/Slack alerting on critical scores
-- [x] NLP-based entity + IOC extraction (spaCy optional, regex fallback)
+- [x] Regex IOC extraction + `alert_entities` storage
 - [ ] IOC feed integration (STIX/TAXII)
 
 ## License
