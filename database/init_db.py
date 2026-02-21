@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus, urlencode
 
 import yaml
@@ -105,6 +106,115 @@ def _migrate_alert_entities_table(conn):
             SELECT alert_id, entity_type, entity_value, COALESCE(created_at, CURRENT_TIMESTAMP)
             FROM alert_entities_legacy"""
         )
+
+
+def _parse_sqlite_datetime(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("T", " ")
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1]
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _canonicalize_assessment_window(start_dt, end_dt):
+    if end_dt is None:
+        return None
+    if end_dt.time() == datetime.min.time():
+        canonical_end = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        canonical_end = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+    if start_dt is not None:
+        raw_days = (end_dt - start_dt).total_seconds() / 86400.0
+        duration_days = max(1, int(round(raw_days)))
+    else:
+        duration_days = 14
+    canonical_start = canonical_end - timedelta(days=duration_days)
+    return canonical_start, canonical_end, duration_days
+
+
+def _compact_legacy_poi_assessments(conn):
+    """Collapse pre-stabilization POI assessment duplicates into daily windows."""
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'poi_assessments'"
+    ).fetchone()
+    if not exists:
+        return 0
+
+    rows = conn.execute(
+        """SELECT id, poi_id, window_start, window_end, created_at
+        FROM poi_assessments
+        ORDER BY datetime(created_at) DESC, id DESC"""
+    ).fetchall()
+    if len(rows) <= 1:
+        return 0
+
+    keep_by_key = {}
+    canonical_bounds = {}
+    delete_ids = []
+
+    for row in rows:
+        start_dt = _parse_sqlite_datetime(row["window_start"])
+        end_dt = _parse_sqlite_datetime(row["window_end"])
+        canonical = _canonicalize_assessment_window(start_dt, end_dt)
+        if canonical is None:
+            key = ("raw", int(row["poi_id"]), str(row["window_start"]), str(row["window_end"]))
+            start_str = str(row["window_start"])
+            end_str = str(row["window_end"])
+        else:
+            canonical_start, canonical_end, duration_days = canonical
+            key = (
+                int(row["poi_id"]),
+                int(duration_days),
+                canonical_end.strftime("%Y-%m-%d"),
+            )
+            start_str = canonical_start.strftime("%Y-%m-%d %H:%M:%S")
+            end_str = canonical_end.strftime("%Y-%m-%d %H:%M:%S")
+
+        if key in keep_by_key:
+            delete_ids.append(int(row["id"]))
+            continue
+
+        row_id = int(row["id"])
+        keep_by_key[key] = row_id
+        canonical_bounds[row_id] = (start_str, end_str)
+
+    if delete_ids:
+        placeholders = ",".join("?" for _ in delete_ids)
+        conn.execute(f"DELETE FROM poi_assessments WHERE id IN ({placeholders})", delete_ids)
+
+    for row_id, (start_str, end_str) in canonical_bounds.items():
+        current = conn.execute(
+            "SELECT window_start, window_end FROM poi_assessments WHERE id = ?",
+            (row_id,),
+        ).fetchone()
+        if not current:
+            continue
+        if current["window_start"] == start_str and current["window_end"] == end_str:
+            continue
+        try:
+            conn.execute(
+                "UPDATE poi_assessments SET window_start = ?, window_end = ? WHERE id = ?",
+                (start_str, end_str, row_id),
+            )
+        except sqlite3.IntegrityError:
+            # Another normalized row already occupies this unique key.
+            conn.execute("DELETE FROM poi_assessments WHERE id = ?", (row_id,))
+            delete_ids.append(row_id)
+
+    return len(delete_ids)
 
 
 def migrate_schema():
@@ -280,6 +390,16 @@ def migrate_schema():
         );
         """
     )
+
+    compacted_rows = _compact_legacy_poi_assessments(conn)
+    if compacted_rows > 0:
+        try:
+            conn.execute(
+                "INSERT INTO retention_log (action, rows_affected) VALUES (?, ?)",
+                ("compact_poi_assessments", int(compacted_rows)),
+            )
+        except sqlite3.OperationalError:
+            pass
 
     # Standardize on flat alert_entities storage; remove legacy normalized tables.
     for sql in (
