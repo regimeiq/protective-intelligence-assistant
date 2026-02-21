@@ -1,79 +1,42 @@
-"""
-Intelligence Report Generator.
-Produces structured analytical summaries from alert data.
-Uses aggregation, ranking, and rule-based templates.
-"""
+"""EP-native daily intelligence reporting."""
 
 import json
 from datetime import datetime, timedelta
 
+from analytics.governance import redact_text
 from analytics.spike_detection import detect_spikes
 from analytics.utils import utcnow
 from database.init_db import get_connection
 
 
-def generate_daily_report(report_date=None):
-    """
-    Generate an intelligence report for a given date (default: today).
-
-    Returns a dict with:
-        - executive_summary: str
-        - top_risks: list of top-scoring alerts
-        - emerging_themes: list of spiking keywords
-        - active_threat_actors: list of mentioned actors
-        - escalation_recommendations: list of actionable items
-        - stats: dict with counts
-    """
-    conn = get_connection()
-    if report_date is None:
-        report_date = utcnow().strftime("%Y-%m-%d")
-
-    next_date = (datetime.strptime(report_date, "%Y-%m-%d") + timedelta(days=1)).strftime(
-        "%Y-%m-%d"
-    )
-
-    # --- Top risks: highest scored unique alerts from the period ---
-    top_alerts = conn.execute(
-        """SELECT a.id, a.title, a.risk_score, a.severity, a.matched_term,
-           s.name as source_name, k.term as keyword, k.category
-        FROM alerts a
-        LEFT JOIN sources s ON a.source_id = s.id
-        LEFT JOIN keywords k ON a.keyword_id = k.id
-        WHERE a.created_at >= ? AND a.created_at < ?
-        AND a.duplicate_of IS NULL
-        ORDER BY a.risk_score DESC
-        LIMIT 10""",
-        (report_date, next_date),
-    ).fetchall()
-
-    # --- Counts by severity (unique alerts only) ---
-    severity_counts = conn.execute(
+def _severity_counts(conn, start_date, end_date):
+    rows = conn.execute(
         """SELECT severity, COUNT(*) as count FROM alerts
         WHERE created_at >= ? AND created_at < ?
-        AND duplicate_of IS NULL
+          AND duplicate_of IS NULL
         GROUP BY severity""",
-        (report_date, next_date),
+        (start_date, end_date),
     ).fetchall()
-    severity_map = {row["severity"]: row["count"] for row in severity_counts}
-    total = sum(severity_map.values())
+    return {row["severity"]: row["count"] for row in rows}
 
-    # --- Emerging themes (spiking keywords) ---
-    spikes = detect_spikes(threshold=1.5, as_of_date=report_date)
 
-    # --- Most mentioned keywords (unique alerts only) ---
-    top_keywords = conn.execute(
-        """SELECT k.term, k.category, COUNT(*) as mention_count
+def _top_operational_alerts(conn, start_date, end_date, limit=10):
+    rows = conn.execute(
+        """SELECT a.id, a.title, a.ors_score, a.tas_score, a.risk_score, a.severity,
+                  a.matched_term, s.name AS source_name, k.term AS keyword, k.category
         FROM alerts a
-        JOIN keywords k ON a.keyword_id = k.id
+        LEFT JOIN sources s ON s.id = a.source_id
+        LEFT JOIN keywords k ON k.id = a.keyword_id
         WHERE a.created_at >= ? AND a.created_at < ?
-        AND a.duplicate_of IS NULL
-        GROUP BY k.id
-        ORDER BY mention_count DESC
-        LIMIT 5""",
-        (report_date, next_date),
+          AND a.duplicate_of IS NULL
+        ORDER BY COALESCE(a.ors_score, a.risk_score) DESC
+        LIMIT ?""",
+        (start_date, end_date, limit),
     ).fetchall()
+    return [dict(row) for row in rows]
 
-    # --- Top entities (last 24h) ---
+
+def _top_entities_and_cves(conn, start_date, end_date):
     top_entities = conn.execute(
         """SELECT ae.entity_type AS type, ae.entity_value AS value, COUNT(*) AS mention_count
         FROM alert_entities ae
@@ -84,10 +47,9 @@ def generate_daily_report(report_date=None):
         GROUP BY ae.entity_type, ae.entity_value
         ORDER BY mention_count DESC
         LIMIT 20""",
-        (report_date, next_date),
+        (start_date, end_date),
     ).fetchall()
 
-    # --- New CVEs (last 24h) ---
     new_cves = conn.execute(
         """SELECT DISTINCT ae.entity_value AS value
         FROM alert_entities ae
@@ -98,186 +60,249 @@ def generate_daily_report(report_date=None):
           AND a.duplicate_of IS NULL
         ORDER BY ae.entity_value DESC
         LIMIT 20""",
-        (report_date, next_date),
+        (start_date, end_date),
+    ).fetchall()
+    return [dict(row) for row in top_entities], [row["value"] for row in new_cves]
+
+
+def _top_poi_status(conn, limit=10):
+    rows = conn.execute(
+        """SELECT pa.poi_id, p.name, p.org, p.role, pa.tas_score, pa.fixation,
+                  pa.energy_burst, pa.leakage, pa.pathway, pa.targeting_specificity,
+                  pa.evidence_json, pa.window_start, pa.window_end
+        FROM poi_assessments pa
+        JOIN pois p ON p.id = pa.poi_id
+        WHERE p.active = 1
+        ORDER BY pa.created_at DESC"""
     ).fetchall()
 
-    # --- Threat actor mentions (unique alerts only) ---
-    actor_keywords = conn.execute(
-        """SELECT k.term, COUNT(*) as count FROM alerts a
-        JOIN keywords k ON a.keyword_id = k.id
-        WHERE k.category = 'threat_actor'
-        AND a.created_at >= ? AND a.created_at < ?
-        AND a.duplicate_of IS NULL
-        GROUP BY k.term ORDER BY count DESC""",
-        (report_date, next_date),
+    latest = {}
+    for row in rows:
+        if row["poi_id"] in latest:
+            continue
+        payload = dict(row)
+        payload["evidence"] = json.loads(payload["evidence_json"] or "{}")
+        latest[row["poi_id"]] = payload
+        if len(latest) >= limit:
+            break
+    return sorted(latest.values(), key=lambda x: x["tas_score"], reverse=True)
+
+
+def _facility_watch(conn, start_date, end_date):
+    rows = conn.execute(
+        """SELECT pl.name AS protected_location,
+                  COUNT(*) AS alert_count,
+                  MAX(COALESCE(a.ors_score, a.risk_score)) AS max_ors,
+                  SUM(CASE WHEN ap.within_radius = 1 THEN 1 ELSE 0 END) AS within_radius_count
+        FROM alert_proximity ap
+        JOIN protected_locations pl ON pl.id = ap.protected_location_id
+        JOIN alerts a ON a.id = ap.alert_id
+        WHERE datetime(COALESCE(a.published_at, a.created_at)) >= datetime(?)
+          AND datetime(COALESCE(a.published_at, a.created_at)) < datetime(?)
+          AND a.duplicate_of IS NULL
+        GROUP BY pl.id
+        ORDER BY max_ors DESC, within_radius_count DESC""",
+        (start_date, end_date),
     ).fetchall()
+    return [dict(row) for row in rows]
 
-    # --- Cross-reference with threat_actors table ---
-    active_actors = []
-    for actor_kw in actor_keywords:
-        matches = conn.execute(
-            """SELECT name, aliases FROM threat_actors
-            WHERE LOWER(name) LIKE ? OR LOWER(aliases) LIKE ?""",
-            (f"%{actor_kw['term'].lower()}%", f"%{actor_kw['term'].lower()}%"),
-        ).fetchall()
-        active_actors.append(
-            {
-                "keyword": actor_kw["term"],
-                "mentions": actor_kw["count"],
-                "known_actors": [{"name": m["name"], "aliases": m["aliases"]} for m in matches],
-            }
+
+def _upcoming_event_watch(conn):
+    rows = conn.execute(
+        """SELECT e.id, e.name, e.type, e.start_dt, e.end_dt, e.city, e.venue,
+                  p.name AS poi_name,
+                  COALESCE(MAX(a.ors_score), 0) AS max_ors,
+                  COUNT(a.id) AS nearby_alerts
+        FROM events e
+        LEFT JOIN pois p ON p.id = e.poi_id
+        LEFT JOIN alert_proximity ap ON ap.within_radius = 1
+        LEFT JOIN alerts a ON a.id = ap.alert_id
+        WHERE datetime(e.start_dt) >= datetime('now')
+          AND datetime(e.start_dt) <= datetime('now', '+7 days')
+        GROUP BY e.id
+        ORDER BY datetime(e.start_dt) ASC"""
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _build_executive_summary(report_date, total, critical, high, prev_total, top_ops, top_pois):
+    delta = total - prev_total
+    direction = "up" if delta > 0 else "down" if delta < 0 else "flat"
+
+    changes = []
+    changes.append(f"Alert volume is {direction} ({total} vs {prev_total} yesterday).")
+    if top_ops:
+        changes.append(
+            f"Top operational driver: '{top_ops[0]['title'][:90]}' (ORS {float(top_ops[0].get('ors_score') or top_ops[0].get('risk_score') or 0):.1f})."
+        )
+    if top_pois:
+        changes.append(
+            f"Highest protectee escalation: {top_pois[0]['name']} (TAS {float(top_pois[0]['tas_score']):.1f})."
         )
 
-    # --- Build executive summary ---
-    critical_count = severity_map.get("critical", 0)
-    high_count = severity_map.get("high", 0)
-    executive_summary = _build_executive_summary(
-        report_date,
-        total,
-        critical_count,
-        high_count,
-        [dict(a) for a in top_alerts[:3]],
-        spikes[:3],
+    return (
+        f"EP Summary for {report_date}: {total} unique alerts, {critical} critical, {high} high. "
+        + " ".join(changes[:3])
     )
 
-    # --- Escalation recommendations ---
-    escalations = _build_escalations([dict(a) for a in top_alerts], spikes, active_actors)
 
-    report = {
-        "report_date": report_date,
-        "executive_summary": executive_summary,
-        "top_risks": [dict(a) for a in top_alerts],
-        "emerging_themes": spikes,
-        "active_threat_actors": active_actors,
-        "escalation_recommendations": escalations,
-        "top_keywords": [dict(k) for k in top_keywords],
-        "top_entities": [dict(e) for e in top_entities],
-        "new_cves": [row["value"] for row in new_cves],
-        "stats": {
-            "total_alerts": total,
-            "critical_count": critical_count,
-            "high_count": high_count,
-            "medium_count": severity_map.get("medium", 0),
-            "low_count": severity_map.get("low", 0),
-        },
-    }
-
-    # --- Persist to intelligence_reports table ---
-    conn.execute(
-        """INSERT INTO intelligence_reports
-        (report_date, executive_summary, top_risks, emerging_themes,
-         active_threat_actors, escalation_recommendations, top_entities,
-         new_cves, total_alerts, critical_count, high_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(report_date) DO UPDATE SET
-            executive_summary = excluded.executive_summary,
-            top_risks = excluded.top_risks,
-            emerging_themes = excluded.emerging_themes,
-            active_threat_actors = excluded.active_threat_actors,
-            escalation_recommendations = excluded.escalation_recommendations,
-            top_entities = excluded.top_entities,
-            new_cves = excluded.new_cves,
-            total_alerts = excluded.total_alerts,
-            critical_count = excluded.critical_count,
-            high_count = excluded.high_count,
-            generated_at = CURRENT_TIMESTAMP""",
-        (
-            report_date,
-            executive_summary,
-            json.dumps([dict(a) for a in top_alerts]),
-            json.dumps(spikes),
-            json.dumps(active_actors),
-            json.dumps(escalations),
-            json.dumps([dict(e) for e in top_entities]),
-            json.dumps([row["value"] for row in new_cves]),
-            total,
-            critical_count,
-            high_count,
-        ),
-    )
-    conn.commit()
-    conn.close()
-    return report
-
-
-def _build_executive_summary(report_date, total, critical, high, top_alerts, spikes):
-    """Build a template-based executive summary string."""
-    lines = []
-    lines.append(f"Intelligence Summary for {report_date}:")
-    lines.append(
-        f"Monitoring detected {total} alert{'s' if total != 1 else ''}, including "
-        f"{critical} critical and {high} high-priority item{'s' if high != 1 else ''}."
-    )
-
-    if critical > 0 and top_alerts:
-        top_title = top_alerts[0].get("title", "Unknown")[:80]
-        lines.append(
-            f'Highest priority: "{top_title}" '
-            f"(risk score: {top_alerts[0].get('risk_score', 0)})."
-        )
-
-    if spikes:
-        spike_terms = ", ".join(s["term"] for s in spikes[:3])
-        lines.append(f"Emerging activity detected for: {spike_terms}.")
-
-    if critical == 0 and high == 0:
-        lines.append("No items require immediate escalation at this time.")
-    elif critical > 0:
-        lines.append("Immediate review recommended for critical-severity items.")
-
-    return " ".join(lines)
-
-
-def _build_escalations(top_alerts, spikes, actors):
-    """Build a list of escalation recommendations."""
+def _build_escalations(top_ops, top_pois, facility_watch):
     escalations = []
-
-    # Critical alerts always escalate
-    for alert in top_alerts:
-        if alert.get("severity") == "critical":
+    for alert in top_ops[:5]:
+        ors = float(alert.get("ors_score") or alert.get("risk_score") or 0.0)
+        tas = float(alert.get("tas_score") or 0.0)
+        if ors >= 85 or tas >= 70:
             escalations.append(
                 {
                     "priority": "IMMEDIATE",
-                    "type": "critical_alert",
-                    "title": alert.get("title", "")[:100],
-                    "risk_score": alert.get("risk_score", 0),
-                    "action": "Review and assess impact. Brief stakeholders within 1 hour.",
+                    "type": "operational_or_targeting",
+                    "alert_id": alert["id"],
+                    "title": alert["title"],
+                    "ors": round(ors, 2),
+                    "tas": round(tas, 2),
+                    "why": "High ORS/TAS indicates potential targeting with operational relevance.",
                 }
             )
-
-    # High-ratio spikes escalate
-    for spike in spikes:
-        if spike["spike_ratio"] >= 3.0:
+    for poi in top_pois[:5]:
+        if float(poi.get("tas_score") or 0) >= 60:
             escalations.append(
                 {
                     "priority": "HIGH",
-                    "type": "frequency_spike",
-                    "term": spike["term"],
-                    "spike_ratio": spike["spike_ratio"],
-                    "action": (
-                        f"'{spike['term']}' activity is {spike['spike_ratio']}x above baseline. "
-                        "Investigate root cause."
-                    ),
+                    "type": "poi_escalation",
+                    "poi": poi["name"],
+                    "tas": round(float(poi["tas_score"]), 2),
+                    "why": "TRAP-lite flags indicate escalating attention toward protectee.",
                 }
             )
-
-    # Known threat actor activity escalates
-    for actor in actors:
-        if actor["known_actors"] and actor["mentions"] >= 2:
-            actor_names = ", ".join(a["name"] for a in actor["known_actors"])
+    for facility in facility_watch[:5]:
+        if int(facility.get("within_radius_count") or 0) > 0:
             escalations.append(
                 {
                     "priority": "HIGH",
-                    "type": "threat_actor_activity",
-                    "actors": actor_names,
-                    "mentions": actor["mentions"],
-                    "action": (
-                        f"Increased chatter referencing {actor_names}. "
-                        "Cross-reference with IOC feeds."
-                    ),
+                    "type": "facility_watch",
+                    "facility": facility["protected_location"],
+                    "within_radius": int(facility.get("within_radius_count") or 0),
+                    "why": "Threat-related alerts are occurring within protected radius.",
                 }
             )
 
+    if not escalations:
+        escalations.append(
+            {
+                "priority": "MEDIUM",
+                "type": "monitoring",
+                "why": "No immediate escalation trigger; continue monitoring and validation.",
+            }
+        )
     priority_order = {"IMMEDIATE": 0, "HIGH": 1, "MEDIUM": 2}
-    escalations.sort(key=lambda x: priority_order.get(x["priority"], 3))
+    escalations.sort(key=lambda x: priority_order.get(x.get("priority", "MEDIUM"), 3))
     return escalations
+
+
+def _apply_redaction(conn, report):
+    report["executive_summary"] = redact_text(conn, report.get("executive_summary", ""))
+    for item in report.get("top_risks", []):
+        item["title"] = redact_text(conn, item.get("title", ""))
+    for item in report.get("protectee_status", []):
+        item["name"] = redact_text(conn, item.get("name", ""))
+        for excerpt_idx, excerpt in enumerate(item.get("evidence", {}).get("excerpts", [])):
+            item["evidence"]["excerpts"][excerpt_idx] = redact_text(conn, excerpt)
+    for item in report.get("escalation_recommendations", []):
+        if "title" in item:
+            item["title"] = redact_text(conn, item["title"])
+        if "poi" in item:
+            item["poi"] = redact_text(conn, item["poi"])
+    return report
+
+
+def generate_daily_report(report_date=None):
+    conn = get_connection()
+    try:
+        if report_date is None:
+            report_date = utcnow().strftime("%Y-%m-%d")
+
+        day_start = report_date
+        day_end = (datetime.strptime(report_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        prev_day = (datetime.strptime(report_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        top_ops = _top_operational_alerts(conn, day_start, day_end, limit=10)
+        severity_map = _severity_counts(conn, day_start, day_end)
+        prev_severity_map = _severity_counts(conn, prev_day, report_date)
+        total = sum(severity_map.values())
+        prev_total = sum(prev_severity_map.values())
+
+        spikes = detect_spikes(threshold=1.5, as_of_date=report_date)
+        top_entities, new_cves = _top_entities_and_cves(conn, day_start, day_end)
+        top_pois = _top_poi_status(conn, limit=10)
+        facility_watch = _facility_watch(conn, day_start, day_end)
+        upcoming_events = _upcoming_event_watch(conn)
+        escalations = _build_escalations(top_ops, top_pois, facility_watch)
+
+        executive_summary = _build_executive_summary(
+            report_date,
+            total,
+            severity_map.get("critical", 0),
+            severity_map.get("high", 0),
+            prev_total,
+            top_ops,
+            top_pois,
+        )
+
+        report = {
+            "report_date": report_date,
+            "executive_summary": executive_summary,
+            "top_risks": top_ops,
+            "protectee_status": top_pois,
+            "facility_watch": facility_watch,
+            "upcoming_events": upcoming_events,
+            "emerging_themes": spikes,
+            "active_threat_actors": [],
+            "escalation_recommendations": escalations,
+            "top_entities": top_entities,
+            "new_cves": new_cves,
+            "stats": {
+                "total_alerts": total,
+                "critical_count": severity_map.get("critical", 0),
+                "high_count": severity_map.get("high", 0),
+                "medium_count": severity_map.get("medium", 0),
+                "low_count": severity_map.get("low", 0),
+            },
+        }
+        report = _apply_redaction(conn, report)
+
+        conn.execute(
+            """INSERT INTO intelligence_reports
+            (report_date, executive_summary, top_risks, emerging_themes,
+             active_threat_actors, escalation_recommendations, top_entities,
+             new_cves, total_alerts, critical_count, high_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(report_date) DO UPDATE SET
+                executive_summary = excluded.executive_summary,
+                top_risks = excluded.top_risks,
+                emerging_themes = excluded.emerging_themes,
+                active_threat_actors = excluded.active_threat_actors,
+                escalation_recommendations = excluded.escalation_recommendations,
+                top_entities = excluded.top_entities,
+                new_cves = excluded.new_cves,
+                total_alerts = excluded.total_alerts,
+                critical_count = excluded.critical_count,
+                high_count = excluded.high_count,
+                generated_at = CURRENT_TIMESTAMP""",
+            (
+                report_date,
+                report["executive_summary"],
+                json.dumps(report["top_risks"]),
+                json.dumps(report["emerging_themes"]),
+                json.dumps(report["active_threat_actors"]),
+                json.dumps(report["escalation_recommendations"]),
+                json.dumps(report["top_entities"]),
+                json.dumps(report["new_cves"]),
+                report["stats"]["total_alerts"],
+                report["stats"]["critical_count"],
+                report["stats"]["high_count"],
+            ),
+        )
+        conn.commit()
+        return report
+    finally:
+        conn.close()

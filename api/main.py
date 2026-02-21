@@ -14,7 +14,10 @@ from database.init_db import (
     get_connection,
     init_db,
     migrate_schema,
+    seed_default_events,
     seed_default_keywords,
+    seed_default_pois,
+    seed_default_protected_locations,
     seed_default_sources,
     seed_threat_actors,
 )
@@ -42,9 +45,9 @@ async def verify_api_key(api_key: Optional[str] = Security(_api_key_header)):
 
 
 app = FastAPI(
-    title="OSINT Threat Monitor API",
-    description="Protective Intelligence REST API — quantitative risk scoring, Bayesian credibility, Z-score anomaly detection, and structured analytical reporting",
-    version="3.1.0",
+    title="Protective Intelligence Assistant API",
+    description="EP-focused REST API for protectee/facility/travel triage with ORS/TAS scoring and explainable uncertainty.",
+    version="4.0.0",
 )
 
 
@@ -59,6 +62,37 @@ class KeywordCreate(BaseModel):
 
 class ClassifyRequest(BaseModel):
     classification: str  # "true_positive" or "false_positive"
+
+
+class POICreate(BaseModel):
+    name: str
+    org: Optional[str] = None
+    role: Optional[str] = None
+    sensitivity: int = 3
+    aliases: list[str] = []
+
+
+class ProtectedLocationCreate(BaseModel):
+    name: str
+    type: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    radius_miles: float = 5.0
+    notes: Optional[str] = None
+
+
+class TravelBriefRequest(BaseModel):
+    destination: str
+    start_dt: str
+    end_dt: str
+    poi_id: Optional[int] = None
+    protected_location_id: Optional[int] = None
+
+
+class DispositionRequest(BaseModel):
+    status: str
+    rationale: Optional[str] = None
+    user: Optional[str] = "analyst"
 
 
 class AlertResponse(BaseModel):
@@ -86,6 +120,9 @@ def startup():
     source_count = conn.execute("SELECT COUNT(*) AS count FROM sources").fetchone()["count"]
     keyword_count = conn.execute("SELECT COUNT(*) AS count FROM keywords").fetchone()["count"]
     actor_count = conn.execute("SELECT COUNT(*) AS count FROM threat_actors").fetchone()["count"]
+    poi_count = conn.execute("SELECT COUNT(*) AS count FROM pois").fetchone()["count"]
+    loc_count = conn.execute("SELECT COUNT(*) AS count FROM protected_locations").fetchone()["count"]
+    event_count = conn.execute("SELECT COUNT(*) AS count FROM events").fetchone()["count"]
     conn.close()
 
     # Seed only on first-run empty tables; do not overwrite analyst-tuned values.
@@ -93,13 +130,19 @@ def startup():
         seed_default_sources()
     if keyword_count == 0:
         seed_default_keywords()
+    if poi_count == 0:
+        seed_default_pois()
+    if loc_count == 0:
+        seed_default_protected_locations()
+    if event_count == 0:
+        seed_default_events()
     if actor_count == 0:
         seed_threat_actors()
 
 
 @app.get("/")
 def root():
-    return {"status": "online", "service": "OSINT Threat Monitor", "version": "3.1.0"}
+    return {"status": "online", "service": "Protective Intelligence Assistant", "version": "4.0.0"}
 
 
 # --- ALERTS ---
@@ -116,7 +159,7 @@ def get_alerts(
 ):
     conn = get_connection()
     query = """
-        SELECT a.id, a.title, a.content, a.url, a.risk_score, a.severity,
+        SELECT a.id, a.title, a.content, a.url, a.risk_score, a.ors_score, a.tas_score, a.severity,
                a.reviewed, a.published_at, a.created_at, a.content_hash, a.duplicate_of,
                s.name as source_name, k.term as matched_term
         FROM alerts a
@@ -170,9 +213,13 @@ def get_alerts_summary():
         "SELECT COUNT(*) as count FROM alerts WHERE reviewed = 0 AND duplicate_of IS NULL"
     ).fetchone()["count"]
     avg_score_row = conn.execute(
-        "SELECT AVG(risk_score) as avg FROM alerts WHERE reviewed = 0 AND duplicate_of IS NULL"
+        "SELECT AVG(COALESCE(ors_score, risk_score)) as avg FROM alerts WHERE reviewed = 0 AND duplicate_of IS NULL"
     ).fetchone()
     avg_risk_score = round(avg_score_row["avg"], 1) if avg_score_row["avg"] else 0.0
+    avg_tas_row = conn.execute(
+        "SELECT AVG(tas_score) as avg FROM alerts WHERE reviewed = 0 AND duplicate_of IS NULL"
+    ).fetchone()
+    avg_tas_score = round(avg_tas_row["avg"], 1) if avg_tas_row["avg"] else 0.0
 
     # Count active spikes
     from analytics.spike_detection import detect_spikes
@@ -189,6 +236,7 @@ def get_alerts_summary():
         "duplicates": duplicates,
         "unreviewed": unreviewed,
         "avg_risk_score": avg_risk_score,
+        "avg_tas_score": avg_tas_score,
         "active_spikes": active_spikes,
         "by_severity": {row["severity"]: row["count"] for row in by_severity},
         "by_source": {row["name"]: row["count"] for row in by_source},
@@ -279,12 +327,22 @@ def get_alert_score(
         ORDER BY computed_at DESC LIMIT 1""",
         (alert_id,),
     ).fetchone()
+    alert_row = conn.execute(
+        "SELECT id, risk_score, ors_score, tas_score, severity FROM alerts WHERE id = ?",
+        (alert_id,),
+    ).fetchone()
     if not score:
         conn.close()
         raise HTTPException(status_code=404, detail="Score not found for alert")
+    if not alert_row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Alert not found")
     conn.close()
 
     payload = dict(score)
+    payload["ors_score"] = alert_row["ors_score"]
+    payload["tas_score"] = alert_row["tas_score"]
+    payload["severity"] = alert_row["severity"]
     if uncertainty == 1:
         try:
             interval = compute_uncertainty_for_alert(
@@ -537,6 +595,256 @@ def get_graph(
     from analytics.graph import build_graph
 
     return build_graph(days=days, min_score=min_score, limit_alerts=limit_alerts)
+
+
+# --- PROTECTIVE INTEL ---
+
+
+@app.get("/pois")
+def get_pois(active_only: int = Query(default=1, ge=0, le=1)):
+    conn = get_connection()
+    query = "SELECT * FROM pois"
+    params = []
+    if active_only == 1:
+        query += " WHERE active = 1"
+    query += " ORDER BY sensitivity DESC, name"
+    pois = [dict(row) for row in conn.execute(query, params).fetchall()]
+    for poi in pois:
+        aliases = conn.execute(
+            "SELECT id, alias, alias_type, active FROM poi_aliases WHERE poi_id = ? ORDER BY alias",
+            (poi["id"],),
+        ).fetchall()
+        poi["aliases"] = [dict(alias) for alias in aliases]
+    conn.close()
+    return pois
+
+
+@app.post("/pois", dependencies=[Depends(verify_api_key)])
+def create_poi(body: POICreate):
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO pois (name, org, role, sensitivity, active) VALUES (?, ?, ?, ?, 1)",
+        (body.name.strip(), body.org, body.role, max(1, min(int(body.sensitivity), 5))),
+    )
+    poi_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    alias_values = body.aliases or [body.name]
+    for alias in alias_values:
+        alias_text = alias.strip()
+        if not alias_text:
+            continue
+        conn.execute(
+            "INSERT INTO poi_aliases (poi_id, alias, alias_type, active) VALUES (?, ?, ?, 1)",
+            (poi_id, alias_text, "name"),
+        )
+    conn.commit()
+    poi = conn.execute("SELECT * FROM pois WHERE id = ?", (poi_id,)).fetchone()
+    aliases = conn.execute(
+        "SELECT id, alias, alias_type, active FROM poi_aliases WHERE poi_id = ? ORDER BY alias",
+        (poi_id,),
+    ).fetchall()
+    conn.close()
+    payload = dict(poi)
+    payload["aliases"] = [dict(alias) for alias in aliases]
+    return payload
+
+
+@app.get("/pois/{poi_id}/hits")
+def get_poi_hits(poi_id: int, days: int = Query(default=14, ge=1, le=90)):
+    conn = get_connection()
+    exists = conn.execute("SELECT id FROM pois WHERE id = ?", (poi_id,)).fetchone()
+    if not exists:
+        conn.close()
+        raise HTTPException(status_code=404, detail="POI not found")
+    rows = conn.execute(
+        """SELECT ph.id, ph.match_type, ph.match_value, ph.match_score, ph.context, ph.created_at,
+                  a.id AS alert_id, a.title, a.ors_score, a.tas_score, a.severity,
+                  COALESCE(a.published_at, a.created_at) AS timestamp
+        FROM poi_hits ph
+        JOIN alerts a ON a.id = ph.alert_id
+        WHERE ph.poi_id = ?
+          AND datetime(COALESCE(a.published_at, a.created_at)) >= datetime('now', ?)
+        ORDER BY COALESCE(a.published_at, a.created_at) DESC""",
+        (poi_id, f"-{int(days)} days"),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.get("/pois/{poi_id}/assessment")
+def get_poi_assessment(
+    poi_id: int,
+    window_days: int = Query(default=14, ge=7, le=30),
+    force: int = Query(default=0, ge=0, le=1),
+):
+    from analytics.tas_assessment import compute_poi_assessment
+
+    conn = get_connection()
+    exists = conn.execute("SELECT id FROM pois WHERE id = ?", (poi_id,)).fetchone()
+    if not exists:
+        conn.close()
+        raise HTTPException(status_code=404, detail="POI not found")
+
+    if force == 1:
+        assessment = compute_poi_assessment(conn, poi_id, window_days=window_days)
+        conn.commit()
+        conn.close()
+        return assessment or {}
+
+    row = conn.execute(
+        """SELECT * FROM poi_assessments
+        WHERE poi_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1""",
+        (poi_id,),
+    ).fetchone()
+    if row:
+        payload = dict(row)
+        payload["evidence"] = json.loads(payload.get("evidence_json") or "{}")
+        conn.close()
+        return payload
+
+    assessment = compute_poi_assessment(conn, poi_id, window_days=window_days)
+    conn.commit()
+    conn.close()
+    return assessment or {}
+
+
+@app.get("/locations/protected")
+def get_protected_locations(active_only: int = Query(default=1, ge=0, le=1)):
+    conn = get_connection()
+    query = "SELECT * FROM protected_locations"
+    if active_only == 1:
+        query += " WHERE active = 1"
+    query += " ORDER BY name"
+    rows = conn.execute(query).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.get("/locations/protected/{location_id}/alerts")
+def get_protected_location_alerts(
+    location_id: int,
+    days: int = Query(default=7, ge=1, le=30),
+    min_ors: float = Query(default=50.0, ge=0.0, le=100.0),
+):
+    conn = get_connection()
+    exists = conn.execute(
+        "SELECT id FROM protected_locations WHERE id = ?",
+        (location_id,),
+    ).fetchone()
+    if not exists:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Protected location not found")
+    rows = conn.execute(
+        """SELECT a.id, a.title, a.ors_score, a.tas_score, a.severity,
+                  COALESCE(a.published_at, a.created_at) AS timestamp,
+                  ap.distance_miles, ap.within_radius,
+                  al.location_text
+        FROM alert_proximity ap
+        JOIN alerts a ON a.id = ap.alert_id
+        LEFT JOIN alert_locations al ON al.alert_id = a.id
+        WHERE ap.protected_location_id = ?
+          AND datetime(COALESCE(a.published_at, a.created_at)) >= datetime('now', ?)
+          AND COALESCE(a.ors_score, a.risk_score) >= ?
+          AND a.duplicate_of IS NULL
+        ORDER BY COALESCE(a.ors_score, a.risk_score) DESC""",
+        (location_id, f"-{int(days)} days", float(min_ors)),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.post("/locations/protected", dependencies=[Depends(verify_api_key)])
+def create_protected_location(body: ProtectedLocationCreate):
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO protected_locations
+        (name, type, lat, lon, radius_miles, active, notes)
+        VALUES (?, ?, ?, ?, ?, 1, ?)""",
+        (body.name.strip(), body.type, body.lat, body.lon, body.radius_miles, body.notes),
+    )
+    location_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    row = conn.execute(
+        "SELECT * FROM protected_locations WHERE id = ?",
+        (location_id,),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(row)
+
+
+@app.get("/analytics/map")
+def get_map_points(days: int = Query(default=7, ge=1, le=30), min_ors: float = Query(default=60.0)):
+    conn = get_connection()
+    protected = conn.execute(
+        """SELECT id, name, type, lat, lon, radius_miles
+        FROM protected_locations
+        WHERE active = 1 AND lat IS NOT NULL AND lon IS NOT NULL"""
+    ).fetchall()
+    alerts = conn.execute(
+        """SELECT a.id, a.title, a.ors_score, a.tas_score, a.severity,
+                  al.location_text, al.lat, al.lon
+        FROM alerts a
+        JOIN alert_locations al ON al.alert_id = a.id
+        WHERE datetime(COALESCE(a.published_at, a.created_at)) >= datetime('now', ?)
+          AND COALESCE(a.ors_score, a.risk_score) >= ?
+          AND al.lat IS NOT NULL AND al.lon IS NOT NULL
+        ORDER BY COALESCE(a.ors_score, a.risk_score) DESC""",
+        (f"-{int(days)} days", float(min_ors)),
+    ).fetchall()
+    conn.close()
+    return {
+        "protected_locations": [dict(row) for row in protected],
+        "alerts": [dict(row) for row in alerts],
+    }
+
+
+@app.post("/briefs/travel")
+def create_travel_brief(body: TravelBriefRequest):
+    from analytics.travel_brief import generate_travel_brief
+
+    return generate_travel_brief(
+        destination=body.destination,
+        start_dt=body.start_dt,
+        end_dt=body.end_dt,
+        poi_id=body.poi_id,
+        protected_location_id=body.protected_location_id,
+        persist=True,
+    )
+
+
+@app.get("/briefs/travel")
+def list_travel_briefs(limit: int = Query(default=20, ge=1, le=100)):
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT id, destination, start_dt, end_dt, created_at
+        FROM travel_briefs
+        ORDER BY created_at DESC
+        LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.post("/alerts/{alert_id}/disposition", dependencies=[Depends(verify_api_key)])
+def create_disposition(alert_id: int, body: DispositionRequest):
+    conn = get_connection()
+    alert = conn.execute("SELECT id FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+    if not alert:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Alert not found")
+    conn.execute(
+        """INSERT INTO dispositions
+        (alert_id, status, rationale, user, created_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+        (alert_id, body.status.strip(), body.rationale, body.user),
+    )
+    disposition_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    row = conn.execute("SELECT * FROM dispositions WHERE id = ?", (disposition_id,)).fetchone()
+    conn.commit()
+    conn.close()
+    return dict(row)
 
 
 # --- KEYWORDS ---
