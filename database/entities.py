@@ -15,21 +15,22 @@ def upsert_entity(conn, entity_type, value):
 
 
 def link_alert_entity(alert_id, entity_id, confidence, extractor, context, conn):
-    """Link an entity to an alert with extractor metadata."""
+    """Link an entity to an alert in flat alert_entities schema."""
+    row = conn.execute(
+        "SELECT type, value FROM entities WHERE id = ?",
+        (entity_id,),
+    ).fetchone()
+    if not row:
+        return
     conn.execute(
         """INSERT INTO alert_entities
-        (alert_id, entity_id, confidence, extractor, context)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(alert_id, entity_id) DO UPDATE SET
-            confidence = COALESCE(excluded.confidence, alert_entities.confidence),
-            extractor = excluded.extractor,
-            context = COALESCE(excluded.context, alert_entities.context)""",
+        (alert_id, entity_type, entity_value, created_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(alert_id, entity_type, entity_value) DO NOTHING""",
         (
             alert_id,
-            entity_id,
-            confidence,
-            extractor,
-            context[:240] if context else None,
+            row["type"],
+            row["value"],
         ),
     )
 

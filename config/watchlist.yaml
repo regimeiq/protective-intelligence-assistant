@@ -1,5 +1,5 @@
 keywords:
-  threat_actors:
+  threat_actor:
     - "APT"
     - "threat actor"
     - "nation state"
@@ -12,7 +12,7 @@ keywords:
     - "botnet"
     - "spyware"
 
-  vulnerabilities:
+  vulnerability:
     - "zero day"
     - "CVE"
     - "exploitation"
@@ -31,6 +31,72 @@ keywords:
     - "critical infrastructure"
     - "election interference"
 
+  protective_intel:
+    - term: "dox"
+      weight: 3.1
+    - term: "doxxing"
+      weight: 3.8
+    - term: "swatting"
+      weight: 3.9
+    - term: "stalking"
+      weight: 3.7
+    - term: "kidnap"
+      weight: 4.8
+    - term: "kidnapping"
+      weight: 4.8
+    - term: "death threat"
+      weight: 5.0
+    - term: "threat to CEO"
+      weight: 4.7
+    - term: "assassination"
+      weight: 5.0
+    - term: "hit list"
+      weight: 4.6
+
+  protest:
+    - term: "protest"
+      weight: 2.2
+    - term: "demonstration"
+      weight: 2.1
+    - term: "march"
+      weight: 1.8
+    - term: "picket"
+      weight: 1.9
+    - term: "blockade"
+      weight: 2.4
+    - term: "sit-in"
+      weight: 2.0
+    - term: "activists"
+      weight: 1.7
+    - term: "boycott"
+      weight: 1.8
+
+  facility_risk:
+    - term: "bomb threat"
+      weight: 5.0
+    - term: "active shooter"
+      weight: 5.0
+    - term: "suspicious package"
+      weight: 3.8
+    - term: "evacuation"
+      weight: 3.2
+    - term: "lockdown"
+      weight: 3.5
+
+  poi:
+    - "elon musk"
+    - "musk"
+    - "satya nadella"
+    - "nadella"
+    - "jensen huang"
+    - "huang"
+    - "tim cook"
+    - "cook"
+    - "sam altman"
+    - "altman"
+    - term: "board chair"
+      weight: 3.8
+
 sources:
   rss:
     - name: "CISA Alerts"
@@ -39,10 +105,19 @@ sources:
       url: "https://krebsonsecurity.com/feed/"
     - name: "BleepingComputer"
       url: "https://www.bleepingcomputer.com/feed/"
+    - name: "GDELT PI/EP Watch"
+      gdelt_query: '("threat to CEO" OR swatting OR doxxing OR "death threat" OR kidnapping OR "bomb threat") AND (executive OR CEO OR "corporate headquarters" OR "company name")'
+      credibility_score: 0.6
     - name: "The Hacker News"
       url: "https://feeds.feedburner.com/TheHackersNews"
     - name: "Dark Reading"
       url: "https://www.darkreading.com/rss.xml"
+    - name: "State Dept Travel Alerts/Warnings"
+      url: "https://travel.state.gov/_res/rss/TAsTWs.xml"
+    - name: "WHO Disease Outbreak News"
+      url: "https://www.who.int/feeds/entity/csr/don/en/rss.xml"
+    - name: "CDC Travel Health Notices"
+      url: "https://wwwnc.cdc.gov/travel/rss/notices.xml"
 
   reddit:
     - name: "r/cybersecurity"

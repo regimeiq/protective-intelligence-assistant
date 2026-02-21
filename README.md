@@ -155,7 +155,7 @@ pip install -r requirements.txt
 # Optional: install spaCy small English model for NER (IOC regex works without this)
 python -m spacy download en_core_web_sm
 
-# Initialize database with sources, keywords, and threat actors
+# Initialize database (seeds from config/watchlist.yaml; falls back to built-in defaults)
 python run.py init
 
 # Run scrapers to collect threat data
@@ -170,6 +170,42 @@ python run.py dashboard
 
 - **API Docs:** http://localhost:8000/docs
 - **Dashboard:** http://localhost:8501
+
+### Config-Driven Seeding
+
+`python run.py init` seeds `sources` and `keywords` from `config/watchlist.yaml` when the file exists.
+If the file is missing or invalid, the app falls back to hardcoded default seed lists.
+
+Expected shape:
+
+```yaml
+sources:
+  rss:
+    - name: "Source Name"
+      url: "https://example.com/feed.xml"
+  reddit:
+    - name: "r/example"
+      url: "https://www.reddit.com/r/example/.rss"
+  pastebin:
+    - name: "Pastebin Archive"
+      url: "https://pastebin.com/archive"
+
+keywords:
+  threat_actors:
+    - "APT29"
+  protective_intel:
+    - term: "death threat"
+      weight: 5.0
+  vulnerabilities:
+    - "CVE"
+  malware:
+    - "ransomware"
+  general:
+    - "phishing"
+```
+
+Keyword entries accept either a string or an object with `term` and optional `weight`.
+If `weight` is omitted, seeding uses `1.0`.
 
 ## Code Quality
 

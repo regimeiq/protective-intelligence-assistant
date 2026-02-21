@@ -239,7 +239,7 @@ def get_alert_score(
     uncertainty: int = Query(default=0, ge=0, le=1),
     n: int = Query(default=500, ge=100, le=5000),
 ):
-    """Get the score breakdown for a specific alert."""
+    """Get the score breakdown for a specific alert, including Monte Carlo interval stats."""
     from analytics.risk_scoring import compute_uncertainty_for_alert
 
     conn = get_connection()
@@ -254,6 +254,8 @@ def get_alert_score(
     conn.close()
 
     payload = dict(score)
+    for field in ("mc_mean", "mc_p05", "mc_p50", "mc_p95", "mc_std"):
+        payload.setdefault(field, None)
     if uncertainty == 1:
         try:
             payload["uncertainty"] = compute_uncertainty_for_alert(alert_id=alert_id, n=n)
@@ -271,11 +273,10 @@ def get_alert_entities(alert_id: int):
         raise HTTPException(status_code=404, detail="Alert not found")
 
     entities = conn.execute(
-        """SELECT e.id, e.type, e.value, ae.confidence, ae.extractor, ae.context
-        FROM alert_entities ae
-        JOIN entities e ON e.id = ae.entity_id
-        WHERE ae.alert_id = ?
-        ORDER BY e.type, e.value""",
+        """SELECT id, entity_type, entity_value, created_at
+        FROM alert_entities
+        WHERE alert_id = ?
+        ORDER BY entity_type, entity_value""",
         (alert_id,),
     ).fetchall()
     conn.close()
@@ -291,11 +292,11 @@ def get_alert_iocs(alert_id: int):
         raise HTTPException(status_code=404, detail="Alert not found")
 
     iocs = conn.execute(
-        """SELECT i.id, i.type, i.value, ai.extractor, ai.context
-        FROM alert_iocs ai
-        JOIN iocs i ON i.id = ai.ioc_id
-        WHERE ai.alert_id = ?
-        ORDER BY i.type, i.value""",
+        """SELECT id, entity_type AS type, entity_value AS value
+        FROM alert_entities
+        WHERE alert_id = ?
+          AND entity_type IN ('ipv4', 'domain', 'url', 'cve', 'md5', 'sha1', 'sha256')
+        ORDER BY entity_type, entity_value""",
         (alert_id,),
     ).fetchall()
     conn.close()

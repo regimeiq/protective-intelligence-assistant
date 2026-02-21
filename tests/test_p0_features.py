@@ -1,6 +1,7 @@
 import math
 from datetime import datetime, timedelta
 
+from analytics.entity_extraction import extract_and_store_alert_entities
 from analytics.extraction import extract, extract_and_store_alert_artifacts
 from analytics.risk_scoring import score_alert
 from analytics.uncertainty import score_distribution
@@ -78,6 +79,39 @@ def test_ioc_endpoint_and_daily_report_include_cve(client):
     assert "CVE-2026-42424" in report_resp.json().get("new_cves", [])
 
 
+def test_entities_endpoint_returns_regex_extracted_iocs(client):
+    conn = get_connection()
+    source_id = conn.execute("SELECT id FROM sources ORDER BY id LIMIT 1").fetchone()["id"]
+    keyword_id = conn.execute("SELECT id FROM keywords WHERE term = 'ransomware'").fetchone()["id"]
+    conn.close()
+
+    alert_id = _insert_alert(
+        source_id=source_id,
+        keyword_id=keyword_id,
+        title="Entity endpoint seed",
+        content="IOC sweep: CVE-2026-10101 from 8.8.8.8 and https://example.com/path",
+        url="https://example.com/entities",
+        risk_score=88.0,
+    )
+
+    conn = get_connection()
+    extract_and_store_alert_entities(
+        conn,
+        alert_id,
+        "Entity endpoint seed IOC sweep: CVE-2026-10101 from 8.8.8.8 and https://example.com/path",
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.get(f"/alerts/{alert_id}/entities")
+    assert response.status_code == 200
+    payload = response.json()
+    pairs = {(item["entity_type"], item["entity_value"]) for item in payload}
+    assert ("cve", "CVE-2026-10101") in pairs
+    assert ("ipv4", "8.8.8.8") in pairs
+    assert ("url", "https://example.com/path") in pairs
+
+
 def test_uncertainty_interval_width_shrinks_with_more_evidence():
     broad = score_distribution(
         keyword_weight=4.0,
@@ -129,6 +163,10 @@ def test_score_endpoint_uncertainty_works_without_weight_sigma(client):
     response = client.get(f"/alerts/{alert_id}/score", params={"uncertainty": 1, "n": 300})
     assert response.status_code == 200
     payload = response.json()
+    assert payload["mc_mean"] is not None
+    assert payload["mc_p05"] is not None
+    assert payload["mc_p95"] is not None
+    assert payload["mc_std"] is not None
     assert "uncertainty" in payload
     assert payload["uncertainty"]["n"] == 300
 

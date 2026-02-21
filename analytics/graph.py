@@ -3,6 +3,8 @@ from datetime import datetime, timedelta
 
 from database.init_db import get_connection
 
+IOC_TYPES = {"ipv4", "domain", "url", "cve", "md5", "sha1", "sha256"}
+
 
 def build_graph(days=7, min_score=70.0, limit_alerts=500):
     """
@@ -47,28 +49,22 @@ def build_graph(days=7, min_score=70.0, limit_alerts=500):
         add_edge(source_node, keyword_node, "source_keyword", alert_weight)
 
         entities = conn.execute(
-            """SELECT e.id, e.type, e.value
-            FROM alert_entities ae
-            JOIN entities e ON e.id = ae.entity_id
-            WHERE ae.alert_id = ?""",
+            """SELECT entity_type, entity_value
+            FROM alert_entities
+            WHERE alert_id = ?""",
             (alert["id"],),
         ).fetchall()
         for entity in entities:
-            entity_node = f"entity:{entity['type']}:{entity['value']}"
-            add_node(entity_node, entity["value"], f"entity:{entity['type']}", alert_weight)
-            add_edge(keyword_node, entity_node, "keyword_entity", alert_weight)
-
-        iocs = conn.execute(
-            """SELECT i.id, i.type, i.value
-            FROM alert_iocs ai
-            JOIN iocs i ON i.id = ai.ioc_id
-            WHERE ai.alert_id = ?""",
-            (alert["id"],),
-        ).fetchall()
-        for ioc in iocs:
-            ioc_node = f"ioc:{ioc['type']}:{ioc['value']}"
-            add_node(ioc_node, ioc["value"], f"ioc:{ioc['type']}", alert_weight)
-            add_edge(keyword_node, ioc_node, "keyword_ioc", alert_weight)
+            entity_type = entity["entity_type"]
+            entity_value = entity["entity_value"]
+            if entity_type in IOC_TYPES:
+                ioc_node = f"ioc:{entity_type}:{entity_value}"
+                add_node(ioc_node, entity_value, f"ioc:{entity_type}", alert_weight)
+                add_edge(keyword_node, ioc_node, "keyword_ioc", alert_weight)
+            else:
+                entity_node = f"entity:{entity_type}:{entity_value}"
+                add_node(entity_node, entity_value, f"entity:{entity_type}", alert_weight)
+                add_edge(keyword_node, entity_node, "keyword_entity", alert_weight)
 
     conn.close()
 

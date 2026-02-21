@@ -74,14 +74,13 @@ def generate_daily_report(report_date=None):
 
     # --- Top entities (last 24h) ---
     top_entities = conn.execute(
-        """SELECT e.type, e.value, COUNT(*) AS mention_count
+        """SELECT ae.entity_type AS type, ae.entity_value AS value, COUNT(*) AS mention_count
         FROM alert_entities ae
-        JOIN entities e ON e.id = ae.entity_id
         JOIN alerts a ON a.id = ae.alert_id
         WHERE COALESCE(a.published_at, a.created_at) >= ?
           AND COALESCE(a.published_at, a.created_at) < ?
           AND a.duplicate_of IS NULL
-        GROUP BY e.type, e.value
+        GROUP BY ae.entity_type, ae.entity_value
         ORDER BY mention_count DESC
         LIMIT 20""",
         (report_date, next_date),
@@ -89,15 +88,14 @@ def generate_daily_report(report_date=None):
 
     # --- New CVEs (last 24h) ---
     new_cves = conn.execute(
-        """SELECT DISTINCT i.value
-        FROM alert_iocs ai
-        JOIN iocs i ON i.id = ai.ioc_id
-        JOIN alerts a ON a.id = ai.alert_id
-        WHERE i.type = 'cve'
+        """SELECT DISTINCT ae.entity_value AS value
+        FROM alert_entities ae
+        JOIN alerts a ON a.id = ae.alert_id
+        WHERE ae.entity_type = 'cve'
           AND COALESCE(a.published_at, a.created_at) >= ?
           AND COALESCE(a.published_at, a.created_at) < ?
           AND a.duplicate_of IS NULL
-        ORDER BY i.value DESC
+        ORDER BY ae.entity_value DESC
         LIMIT 20""",
         (report_date, next_date),
     ).fetchall()

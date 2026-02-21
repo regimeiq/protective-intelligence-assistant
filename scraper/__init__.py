@@ -12,7 +12,7 @@ import asyncio
 import time
 from datetime import datetime
 
-from analytics.extraction import extract_and_store_alert_artifacts
+from analytics.entity_extraction import extract_and_store_alert_entities
 from database.init_db import get_connection
 from scraper.pastebin_monitor import run_pastebin_scraper
 from scraper.reddit_scraper import run_reddit_scraper
@@ -164,7 +164,7 @@ async def run_rss_scraper_async(frequency_snapshot=None):
                             frequency_override=score_args[0] if score_args else None,
                             z_score_override=score_args[1] if score_args else None,
                         )
-                        extract_and_store_alert_artifacts(conn, alert_id, f"{title}\n{content}")
+                        extract_and_store_alert_entities(conn, alert_id, f"{title}\n{content}")
                         increment_keyword_frequency(conn, keyword["id"])
                         new_alerts += 1
                     else:
@@ -255,7 +255,7 @@ async def run_reddit_scraper_async(frequency_snapshot=None):
                             frequency_override=score_args[0] if score_args else None,
                             z_score_override=score_args[1] if score_args else None,
                         )
-                        extract_and_store_alert_artifacts(conn, alert_id, f"{title}\n{content}")
+                        extract_and_store_alert_entities(conn, alert_id, f"{title}\n{content}")
                         increment_keyword_frequency(conn, keyword["id"])
                         new_alerts += 1
                     else:

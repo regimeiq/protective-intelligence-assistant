@@ -2,7 +2,7 @@
 OSINT Threat Monitor - Entry Point
 
 Usage:
-    python run.py init        Initialize database with default sources and keywords
+    python run.py init        Initialize DB and seed from config/watchlist.yaml (fallback defaults)
     python run.py scrape      Run all scrapers
     python run.py api         Start FastAPI server
     python run.py dashboard   Start Streamlit dashboard

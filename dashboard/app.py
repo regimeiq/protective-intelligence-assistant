@@ -348,11 +348,14 @@ with tab_alerts:
 
                     # Score breakdown
                     try:
-                        score_data = requests.get(
-                            f"{API_URL}/alerts/{alert['id']}/score",
-                            params={"uncertainty": 1, "n": 500},
-                        ).json()
+                        score_data = requests.get(f"{API_URL}/alerts/{alert['id']}/score").json()
                         if "keyword_weight" in score_data:
+                            if score_data.get("mc_p05") is not None and score_data.get("mc_p95") is not None:
+                                score_center = score_data.get("final_score", score)
+                                st.markdown(
+                                    f"**Risk Score:** {score_center:.1f} "
+                                    f"(p05={score_data['mc_p05']:.1f} / p95={score_data['mc_p95']:.1f})"
+                                )
                             st.markdown("**Score Breakdown:**")
                             sc1, sc2, sc3, sc4, sc5 = st.columns(5)
                             sc1.metric("Keyword Weight", f"{score_data['keyword_weight']:.1f}")
@@ -362,13 +365,12 @@ with tab_alerts:
                             sc3.metric("Frequency Factor", f"{score_data['frequency_factor']:.1f}x")
                             sc4.metric("Z-Score", f"{score_data.get('z_score', 0):.2f}")
                             sc5.metric("Recency Factor", f"{score_data['recency_factor']:.2f}")
-                            uncertainty = score_data.get("uncertainty")
-                            if uncertainty:
+                            if score_data.get("mc_p05") is not None:
                                 uc1, uc2, uc3, uc4 = st.columns(4)
-                                uc1.metric("P05", f"{uncertainty['p05']:.1f}")
-                                uc2.metric("P50", f"{uncertainty['p50']:.1f}")
-                                uc3.metric("P95", f"{uncertainty['p95']:.1f}")
-                                uc4.metric("Std Dev", f"{uncertainty['std']:.2f}")
+                                uc1.metric("MC P05", f"{score_data['mc_p05']:.1f}")
+                                uc2.metric("MC P50", f"{score_data['mc_p50']:.1f}")
+                                uc3.metric("MC P95", f"{score_data['mc_p95']:.1f}")
+                                uc4.metric("MC Std", f"{score_data['mc_std']:.2f}")
                     except Exception:
                         pass
 
@@ -378,30 +380,26 @@ with tab_alerts:
                         iocs = requests.get(f"{API_URL}/alerts/{alert['id']}/iocs").json()
                         if entities:
                             st.markdown("**Entities:**")
-                            st.dataframe(
-                                pd.DataFrame(entities)[["type", "value", "extractor"]].rename(
-                                    columns={
-                                        "type": "Type",
-                                        "value": "Value",
-                                        "extractor": "Extractor",
-                                    }
-                                ),
-                                use_container_width=True,
-                                hide_index=True,
+                            chips = " ".join(
+                                f"`{item.get('entity_type', 'unknown')}: {item.get('entity_value', '')}`"
+                                for item in entities[:30]
                             )
+                            st.markdown(chips)
                         if iocs:
                             st.markdown("**IOCs:**")
-                            st.dataframe(
-                                pd.DataFrame(iocs)[["type", "value", "extractor"]].rename(
-                                    columns={
-                                        "type": "Type",
-                                        "value": "Value",
-                                        "extractor": "Extractor",
-                                    }
-                                ),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
+                            ioc_df = pd.DataFrame(iocs)
+                            cols = [c for c in ["type", "value"] if c in ioc_df.columns]
+                            if cols:
+                                st.dataframe(
+                                    ioc_df[cols].rename(
+                                        columns={
+                                            "type": "Type",
+                                            "value": "Value",
+                                        }
+                                    ),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
                     except Exception:
                         pass
 
@@ -987,6 +985,7 @@ with tab_config:
                     "incident",
                     "vulnerability",
                     "threat_actor",
+                    "poi",
                     "tactics",
                     "financial",
                 ],
@@ -1013,6 +1012,58 @@ with tab_config:
                 c for c in ["id", "term", "category", "weight", "active"] if c in kw_df.columns
             ]
             st.dataframe(kw_df[display_cols], use_container_width=True, hide_index=True)
+    except Exception:
+        pass
+
+    st.divider()
+
+    # --- POI Watchlist ---
+    st.markdown("### POI Watchlist")
+    st.caption("Add person-of-interest names and aliases as keyword terms (category: poi).")
+
+    with st.form("add_poi_term"):
+        pc1, pc2 = st.columns([3, 1])
+        with pc1:
+            poi_term = st.text_input("POI Term / Alias")
+        with pc2:
+            poi_weight = st.slider("POI Weight", 0.1, 5.0, 4.0, 0.1)
+        poi_submitted = st.form_submit_button("Add POI")
+        if poi_submitted and poi_term:
+            resp = requests.post(
+                f"{API_URL}/keywords",
+                json={"term": poi_term, "category": "poi", "weight": poi_weight},
+            )
+            if resp.status_code == 200:
+                st.success(f"Added POI term: {poi_term} (weight: {poi_weight})")
+                st.rerun()
+            else:
+                st.error("POI term already exists or could not be added.")
+
+    try:
+        keywords = requests.get(f"{API_URL}/keywords").json()
+        poi_keywords = [k for k in keywords if k.get("category") == "poi"]
+        if poi_keywords:
+            poi_df = pd.DataFrame(poi_keywords)
+            st.dataframe(
+                poi_df[[c for c in ["id", "term", "weight", "active"] if c in poi_df.columns]].rename(
+                    columns={"id": "ID", "term": "Term", "weight": "Weight", "active": "Active"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            remove_map = {f"{k['term']} (id={k['id']})": k["id"] for k in poi_keywords}
+            selected_remove = st.selectbox("Remove POI term", ["None"] + list(remove_map.keys()))
+            if selected_remove != "None":
+                if st.button("Remove Selected POI"):
+                    keyword_id = remove_map[selected_remove]
+                    resp = requests.delete(f"{API_URL}/keywords/{keyword_id}")
+                    if resp.status_code == 200:
+                        st.success("POI term removed.")
+                        st.rerun()
+                    else:
+                        st.error("Could not remove POI term.")
+        else:
+            st.info("No POI terms configured yet.")
     except Exception:
         pass
 

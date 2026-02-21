@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS alert_scores (
     z_score REAL DEFAULT 0.0,
     recency_factor REAL DEFAULT 1.0,
     final_score REAL NOT NULL,
+    mc_mean REAL,
+    mc_p05 REAL,
+    mc_p50 REAL,
+    mc_p95 REAL,
+    mc_std REAL,
     computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
 );
@@ -124,14 +129,13 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 
 CREATE TABLE IF NOT EXISTS alert_entities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     alert_id INTEGER NOT NULL,
-    entity_id INTEGER NOT NULL,
-    confidence REAL,
-    extractor TEXT NOT NULL,
-    context TEXT,
-    PRIMARY KEY(alert_id, entity_id),
-    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE,
-    FOREIGN KEY (entity_id) REFERENCES entities(id) ON DELETE CASCADE
+    entity_type TEXT NOT NULL,
+    entity_value TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(alert_id, entity_type, entity_value),
+    FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS iocs (

@@ -6,6 +6,7 @@ spaCy NER is optional; regex IOC extraction always runs.
 
 import re
 
+from analytics.entity_extraction import store_alert_entities
 from database.entities import (
     link_alert_entity,
     link_alert_ioc,
@@ -166,3 +167,9 @@ def extract_and_store_alert_artifacts(conn, alert_id, text):
             context=item.get("context"),
             conn=conn,
         )
+
+    # Populate flat alert_entities table with IOC artifacts for API/dashboard usage.
+    flat_iocs = [
+        {"entity_type": item["type"], "entity_value": item["value"]} for item in extracted["iocs"]
+    ]
+    store_alert_entities(conn, alert_id, flat_iocs)

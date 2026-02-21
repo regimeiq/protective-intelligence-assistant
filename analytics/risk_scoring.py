@@ -16,6 +16,8 @@ Severity derivation:
   0-39   = low
 """
 
+import math
+import random
 from datetime import datetime, timedelta, timezone
 
 
@@ -81,6 +83,19 @@ def get_source_credibility(conn, source_id):
         return row["credibility_score"] if row["credibility_score"] else 0.5
 
     return round(alpha / (alpha + beta), 4)
+
+
+def get_source_beta_params(conn, source_id):
+    """Fetch source Bayesian alpha/beta with sane defaults."""
+    row = conn.execute(
+        "SELECT bayesian_alpha, bayesian_beta FROM sources WHERE id = ?",
+        (source_id,),
+    ).fetchone()
+    if not row:
+        return 2.0, 2.0
+    alpha = float(row["bayesian_alpha"] or 2.0)
+    beta = float(row["bayesian_beta"] or 2.0)
+    return max(0.01, alpha), max(0.01, beta)
 
 
 def get_frequency_factor(conn, keyword_id):
@@ -190,6 +205,104 @@ def _compute_recency_factor(published_at=None, created_at=None):
     return max(0.1, 1.0 - (recency_hours / 168.0)), recency_hours
 
 
+def _truncated_normal_sample(rng, mean, sd, lower, upper, max_attempts=20):
+    """Sample from a normal distribution with truncation bounds."""
+    safe_sd = max(float(sd), 0.001)
+    for _ in range(max_attempts):
+        value = rng.gauss(float(mean), safe_sd)
+        if lower <= value <= upper:
+            return value
+    return min(upper, max(lower, value))
+
+
+def _percentile(sorted_values, quantile):
+    if not sorted_values:
+        return 0.0
+    if quantile <= 0:
+        return sorted_values[0]
+    if quantile >= 1:
+        return sorted_values[-1]
+    idx = (len(sorted_values) - 1) * quantile
+    lower = math.floor(idx)
+    upper = math.ceil(idx)
+    if lower == upper:
+        return sorted_values[lower]
+    weight = idx - lower
+    return (sorted_values[lower] * (1 - weight)) + (sorted_values[upper] * weight)
+
+
+def simulate_risk_score(
+    keyword_weight,
+    frequency_factor,
+    recency_factor,
+    alpha,
+    beta,
+    n=500,
+):
+    """
+    Monte Carlo uncertainty simulation for alert scoring.
+
+    Samples:
+      - keyword_weight ~ Normal(w, 0.15*w), truncated [0.1, 5.0]
+      - source_credibility ~ Beta(alpha, beta)
+      - frequency_factor ~ Normal(f, 0.20), truncated [1.0, 4.0]
+      - recency_factor ~ Normal(r, 0.03), truncated [0.1, 1.0]
+    """
+    safe_n = max(100, int(n))
+    rng = random.Random()
+    samples = []
+    base_weight = float(keyword_weight or 1.0)
+    base_freq = float(frequency_factor or 1.0)
+    base_recency = float(recency_factor or 0.1)
+    safe_alpha = max(float(alpha or 0.01), 0.01)
+    safe_beta = max(float(beta or 0.01), 0.01)
+
+    for _ in range(safe_n):
+        sampled_weight = _truncated_normal_sample(
+            rng=rng,
+            mean=base_weight,
+            sd=max(0.05, 0.15 * base_weight),
+            lower=0.1,
+            upper=5.0,
+        )
+        sampled_credibility = rng.betavariate(safe_alpha, safe_beta)
+        sampled_frequency = _truncated_normal_sample(
+            rng=rng,
+            mean=base_freq,
+            sd=0.20,
+            lower=1.0,
+            upper=4.0,
+        )
+        sampled_recency_factor = _truncated_normal_sample(
+            rng=rng,
+            mean=base_recency,
+            sd=0.03,
+            lower=0.1,
+            upper=1.0,
+        )
+        sampled_recency_hours = max(0.0, (1.0 - sampled_recency_factor) * 168.0)
+        sampled_score, _ = compute_risk_score(
+            keyword_weight=sampled_weight,
+            source_credibility=sampled_credibility,
+            frequency_factor=sampled_frequency,
+            recency_hours=sampled_recency_hours,
+        )
+        samples.append(sampled_score)
+
+    samples.sort()
+    mean = sum(samples) / len(samples)
+    variance = sum((score - mean) ** 2 for score in samples) / len(samples)
+    std = math.sqrt(variance)
+
+    return {
+        "mean": round(mean, 3),
+        "std": round(std, 3),
+        "p05": round(_percentile(samples, 0.05), 3),
+        "p50": round(_percentile(samples, 0.50), 3),
+        "p95": round(_percentile(samples, 0.95), 3),
+    }
+
+
 def score_alert(
     conn,
     alert_id,
@@ -220,6 +333,15 @@ def score_alert(
     risk_score, severity = compute_risk_score(
         keyword_weight, source_credibility, frequency_factor, recency_hours
     )
+    source_alpha, source_beta = get_source_beta_params(conn, source_id)
+    mc_stats = simulate_risk_score(
+        keyword_weight=keyword_weight,
+        frequency_factor=frequency_factor,
+        recency_factor=recency_factor,
+        alpha=source_alpha,
+        beta=source_beta,
+        n=500,
+    )
 
     conn.execute(
         "UPDATE alerts SET risk_score = ?, severity = ? WHERE id = ?",
@@ -227,8 +349,9 @@ def score_alert(
     )
     conn.execute(
         """INSERT INTO alert_scores
-        (alert_id, keyword_weight, source_credibility, frequency_factor, z_score, recency_factor, final_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (alert_id, keyword_weight, source_credibility, frequency_factor, z_score, recency_factor, final_score,
+         mc_mean, mc_p05, mc_p50, mc_p95, mc_std)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             alert_id,
             keyword_weight,
@@ -237,6 +360,11 @@ def score_alert(
             z_score,
             recency_factor,
             risk_score,
+            mc_stats["mean"],
+            mc_stats["p05"],
+            mc_stats["p50"],
+            mc_stats["p95"],
+            mc_stats["std"],
         ),
     )
     return risk_score

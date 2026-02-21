@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from analytics.dedup import check_duplicate
-from analytics.extraction import extract_and_store_alert_artifacts
+from analytics.entity_extraction import extract_and_store_alert_entities
 from analytics.risk_scoring import (
     build_frequency_snapshot,
     increment_keyword_frequency,
@@ -133,7 +133,7 @@ def run_pastebin_scraper(frequency_snapshot=None):
                         frequency_override=score_args[0] if score_args else None,
                         z_score_override=score_args[1] if score_args else None,
                     )
-                    extract_and_store_alert_artifacts(
+                    extract_and_store_alert_entities(
                         conn, alert_id, f"{paste['title']}\n{content}"
                     )
                     increment_keyword_frequency(conn, keyword["id"])
