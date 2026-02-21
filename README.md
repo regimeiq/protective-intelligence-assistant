@@ -59,6 +59,13 @@ Source trustworthiness is modeled as a Beta distribution. Each source starts wit
 
 Credibility converges toward empirical precision as classifications accumulate.
 
+### Monte Carlo Uncertainty (On-Demand)
+
+`/alerts/{id}/score?uncertainty=1` computes and caches score intervals in `alert_score_intervals` (6-hour cache window by default):
+- sampled: source credibility (`Beta(alpha, beta)`), keyword weight (`Normal(weight, sigma)` clipped to `[0.1, 5.0]`)
+- deterministic: frequency factor and recency factor from the scored alert
+- output: `mean`, `std`, `p05`, `p50`, `p95`, `method`
+
 ### Content Deduplication
 
 Two-tier dedup pipeline prevents duplicate alerts from inflating risk signals:
@@ -98,6 +105,7 @@ Person-of-interest monitoring uses the existing `keywords` table with category `
 - one alias per keyword row
 - higher default seed weight for `poi` terms (`4.0`)
 - configurable via `config/watchlist.yaml` and the dashboard Configuration tab
+- matching is keyword-based; ambiguous single-token aliases can create false positives, so defaults favor multi-token names
 
 ### Regex IOC Entity Extraction
 
@@ -136,7 +144,7 @@ Artifacts are exposed through `/alerts/{id}/entities` and displayed in the alert
                            │
                     ┌──────▼──────┐
                     │  SQLite DB  │  Alerts, scores, frequencies,
-                    │ (14 tables) │  threat actors, reports, metrics
+                    │ (11 tables) │  threat actors, reports, metrics
                     └──────┬──────┘
                            │
               ┌────────────┼────────────┐
@@ -155,7 +163,7 @@ Artifacts are exposed through `/alerts/{id}/entities` and displayed in the alert
 | Scraping | Feedparser, BeautifulSoup, aiohttp (async) |
 | Analytics | Z-score, Bayesian Beta, SHA-256 dedup (Python stdlib + aiohttp) |
 | API | FastAPI (27 endpoints) |
-| Database | SQLite (14 tables) |
+| Database | SQLite (11 tables) |
 | Dashboard | Streamlit + Plotly |
 | Container | Docker, docker-compose |
 | Language | Python 3.11+ |
@@ -168,6 +176,7 @@ cd osint-threat-monitor
 pip install -r requirements.txt
 
 # Optional: install spaCy small English model for NER (IOC regex works without this)
+pip install "spacy>=3.7"
 python -m spacy download en_core_web_sm
 
 # Initialize database (seeds from config/watchlist.yaml; falls back to built-in defaults)
@@ -185,6 +194,12 @@ python run.py dashboard
 
 - **API Docs:** http://localhost:8000/docs
 - **Dashboard:** http://localhost:8501
+
+### Smoke Test
+
+```bash
+./scripts/smoke_test.sh
+```
 
 ### Config-Driven Seeding
 
@@ -245,7 +260,7 @@ The repo is configured for `black`, `isort`, and `ruff` via `pyproject.toml`.
 |--------|----------|-------------|
 | GET | `/alerts` | Retrieve alerts (filter by severity, score, review status) |
 | GET | `/alerts/summary` | Aggregated metrics + avg risk score + spike count + dedup stats |
-| GET | `/alerts/{id}/score` | Score breakdown with Z-score and Bayesian credibility |
+| GET | `/alerts/{id}/score` | Score breakdown; add `?uncertainty=1&n=500` for cached Monte Carlo interval |
 | GET | `/alerts/{id}/entities` | Regex IOC entities for one alert (`entity_type`, `entity_value`) |
 | GET | `/alerts/{id}/iocs` | IOC convenience view derived from `alert_entities` |
 | PATCH | `/alerts/{id}/review` | Mark alert as reviewed |
@@ -293,6 +308,7 @@ curl "http://localhost:8000/analytics/graph?days=7&min_score=70&limit_alerts=500
 osint-threat-monitor/
 ├── analytics/
 │   ├── risk_scoring.py          # Z-score + Bayesian multi-factor scoring engine
+│   ├── uncertainty.py           # Cached Monte Carlo interval engine
 │   ├── spike_detection.py       # Z-score keyword frequency spike detection
 │   ├── intelligence_report.py   # Daily intelligence report generator
 │   ├── entity_extraction.py     # Regex IOC extraction + storage
@@ -309,9 +325,11 @@ osint-threat-monitor/
 │   └── app.py                   # Streamlit dashboard (9 tabs)
 ├── database/
 │   ├── init_db.py               # DB init, migration, seeding
-│   └── schema.sql               # SQLite schema (14 tables)
+│   └── schema.sql               # SQLite schema (11 tables)
 ├── config/
 │   └── watchlist.yaml           # Reference keyword/source config
+├── scripts/
+│   └── smoke_test.sh            # Fresh-clone runnable smoke test
 ├── run.py                       # CLI entry point
 ├── Dockerfile
 ├── docker-compose.yml
@@ -326,22 +344,19 @@ osint-threat-monitor/
 | `sources` | Intelligence sources with Bayesian credibility (alpha/beta/TP/FP) |
 | `keywords` | Watchlist terms with threat weights |
 | `alerts` | Matched threat alerts with risk scores and content hashes |
-| `alert_scores` | Score audit trail (weight breakdown + Z-score + Monte Carlo stats per alert) |
+| `alert_scores` | Score audit trail (weight breakdown + Z-score point estimate) |
 | `keyword_frequency` | Daily keyword match counts (for Z-score spike detection) |
 | `intelligence_reports` | Persisted daily analytical summaries |
 | `threat_actors` | Known threat actor profiles |
 | `evaluation_metrics` | Per-source precision/recall/F1 over time |
 | `scrape_runs` | Scraping performance benchmarks (duration, alerts/sec) |
 | `alert_entities` | Regex IOC entities linked to alerts |
-| `entities` | Legacy normalized entity store (retained for compatibility) |
-| `iocs` | Legacy normalized IOC store (retained for compatibility) |
-| `alert_iocs` | Legacy alert-IOC links (retained for compatibility) |
 | `alert_score_intervals` | On-demand uncertainty interval cache |
 
 ## Roadmap
 
 - [x] Multi-source scraping (RSS, Reddit, Pastebin)
-- [x] SQLite database with structured schema (14 tables)
+- [x] SQLite database with structured schema (11 tables)
 - [x] FastAPI REST API (27 endpoints)
 - [x] Keyword matching engine with regex boundaries
 - [x] Streamlit dashboard with interactive charts (9 tabs)

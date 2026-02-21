@@ -84,16 +84,16 @@ keywords:
       weight: 3.5
 
   poi:
-    - "elon musk"
-    - "musk"
-    - "satya nadella"
-    - "nadella"
-    - "jensen huang"
-    - "huang"
-    - "tim cook"
-    - "cook"
-    - "sam altman"
-    - "altman"
+    - term: "Elon Musk"
+      weight: 4.0
+    - term: "Satya Nadella"
+      weight: 4.0
+    - term: "Jensen Huang"
+      weight: 4.0
+    - term: "Tim Cook"
+      weight: 4.0
+    - term: "Sam Altman"
+      weight: 4.0
     - term: "board chair"
       weight: 3.8
 

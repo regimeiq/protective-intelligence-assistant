@@ -74,7 +74,6 @@ def _create_alert_entities_v2(conn):
 def _migrate_alert_entities_table(conn):
     """
     Ensure alert_entities matches flat IOC-entity schema.
-    Migrates legacy normalized schema if present.
     """
     existing = conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alert_entities'"
@@ -99,16 +98,6 @@ def _migrate_alert_entities_table(conn):
             SELECT alert_id, entity_type, entity_value, COALESCE(created_at, CURRENT_TIMESTAMP)
             FROM alert_entities_legacy"""
         )
-        return
-
-    if {"alert_id", "entity_id"}.issubset(legacy_cols):
-        conn.execute(
-            """INSERT OR IGNORE INTO alert_entities
-            (alert_id, entity_type, entity_value, created_at)
-            SELECT ae.alert_id, e.type, e.value, CURRENT_TIMESTAMP
-            FROM alert_entities_legacy ae
-            JOIN entities e ON e.id = ae.entity_id"""
-        )
 
 
 def migrate_schema():
@@ -127,11 +116,6 @@ def migrate_schema():
         "ALTER TABLE alerts ADD COLUMN duplicate_of INTEGER",
         "ALTER TABLE alerts ADD COLUMN published_at TIMESTAMP",
         "ALTER TABLE alert_scores ADD COLUMN z_score REAL DEFAULT 0.0",
-        "ALTER TABLE alert_scores ADD COLUMN mc_mean REAL",
-        "ALTER TABLE alert_scores ADD COLUMN mc_p05 REAL",
-        "ALTER TABLE alert_scores ADD COLUMN mc_p50 REAL",
-        "ALTER TABLE alert_scores ADD COLUMN mc_p95 REAL",
-        "ALTER TABLE alert_scores ADD COLUMN mc_std REAL",
         "ALTER TABLE threat_actors ADD COLUMN alert_count INTEGER DEFAULT 0",
         "ALTER TABLE intelligence_reports ADD COLUMN top_entities TEXT",
         "ALTER TABLE intelligence_reports ADD COLUMN new_cves TEXT",
@@ -144,6 +128,17 @@ def migrate_schema():
 
     _migrate_alert_entities_table(conn)
 
+    # Standardize on flat alert_entities storage; remove legacy normalized tables.
+    for sql in (
+        "DROP TABLE IF EXISTS alert_iocs",
+        "DROP TABLE IF EXISTS iocs",
+        "DROP TABLE IF EXISTS entities",
+    ):
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass
+
     # Indexes for performance
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_alerts_content_hash ON alerts(content_hash)",
@@ -151,11 +146,8 @@ def migrate_schema():
         "CREATE INDEX IF NOT EXISTS idx_alerts_created_date ON alerts(created_at)",
         "CREATE INDEX IF NOT EXISTS idx_alerts_published_date ON alerts(published_at)",
         "CREATE INDEX IF NOT EXISTS idx_keyword_frequency_kw_date ON keyword_frequency(keyword_id, date)",
-        "CREATE INDEX IF NOT EXISTS idx_entities_type_value ON entities(type, value)",
-        "CREATE INDEX IF NOT EXISTS idx_iocs_type_value ON iocs(type, value)",
         "CREATE INDEX IF NOT EXISTS idx_alert_entities_alert ON alert_entities(alert_id)",
         "CREATE INDEX IF NOT EXISTS idx_alert_entities_type_value ON alert_entities(entity_type, entity_value)",
-        "CREATE INDEX IF NOT EXISTS idx_alert_iocs_alert ON alert_iocs(alert_id)",
     ]
     for sql in indexes:
         try:

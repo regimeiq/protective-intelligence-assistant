@@ -2,17 +2,12 @@
 Entity + IOC extraction for alert text.
 
 spaCy NER is optional; regex IOC extraction always runs.
+All extracted artifacts are persisted to alert_entities.
 """
 
 import re
 
 from analytics.entity_extraction import store_alert_entities
-from database.entities import (
-    link_alert_entity,
-    link_alert_ioc,
-    upsert_entity,
-    upsert_ioc,
-)
 
 _SPACY_ATTEMPTED = False
 _SPACY_NLP = None
@@ -54,12 +49,12 @@ def _load_spacy_model():
 
 
 def _normalize_ioc(ioc_type, value):
-    v = value.strip().strip(".,);")
+    normalized = value.strip().strip(".,);")
     if ioc_type in {"cve"}:
-        return v.upper()
+        return normalized.upper()
     if ioc_type in {"domain", "email", "md5", "sha1", "sha256"}:
-        return v.lower()
-    return v
+        return normalized.lower()
+    return normalized
 
 
 def _extract_iocs(text):
@@ -143,33 +138,12 @@ def extract(text):
 
 
 def extract_and_store_alert_artifacts(conn, alert_id, text):
-    """Extract entities/IOCs and persist links for one alert."""
+    """Extract entities/IOCs and persist flat artifacts for one alert."""
     extracted = extract(text)
-    entity_extractor = extracted["meta"].get("extractor_used", "regex")
 
-    for item in extracted["entities"]:
-        entity_id = upsert_entity(conn, item["type"], item["value"])
-        link_alert_entity(
-            alert_id=alert_id,
-            entity_id=entity_id,
-            confidence=item.get("confidence"),
-            extractor=entity_extractor,
-            context=item.get("context"),
-            conn=conn,
-        )
-
-    for item in extracted["iocs"]:
-        ioc_id = upsert_ioc(conn, item["type"], item["value"])
-        link_alert_ioc(
-            alert_id=alert_id,
-            ioc_id=ioc_id,
-            extractor="regex",
-            context=item.get("context"),
-            conn=conn,
-        )
-
-    # Populate flat alert_entities table with IOC artifacts for API/dashboard usage.
-    flat_iocs = [
-        {"entity_type": item["type"], "entity_value": item["value"]} for item in extracted["iocs"]
+    artifacts = [
+        {"entity_type": item["type"], "entity_value": item["value"]}
+        for item in extracted["entities"] + extracted["iocs"]
     ]
-    store_alert_entities(conn, alert_id, flat_iocs)
+    store_alert_entities(conn, alert_id, artifacts)
+    return extracted

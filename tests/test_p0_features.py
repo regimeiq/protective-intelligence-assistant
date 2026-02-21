@@ -163,12 +163,16 @@ def test_score_endpoint_uncertainty_works_without_weight_sigma(client):
     response = client.get(f"/alerts/{alert_id}/score", params={"uncertainty": 1, "n": 300})
     assert response.status_code == 200
     payload = response.json()
-    assert payload["mc_mean"] is not None
-    assert payload["mc_p05"] is not None
-    assert payload["mc_p95"] is not None
-    assert payload["mc_std"] is not None
+    assert "mc_mean" not in payload
+    assert "mc_p05" not in payload
+    assert "mc_p95" not in payload
+    assert "mc_std" not in payload
     assert "uncertainty" in payload
     assert payload["uncertainty"]["n"] == 300
+    assert payload["uncertainty"]["mean"] is not None
+    assert payload["uncertainty"]["p05"] is not None
+    assert payload["uncertainty"]["p95"] is not None
+    assert payload["uncertainty"]["std"] is not None
 
 
 def test_forecast_fallback_and_ewma_modes(client):

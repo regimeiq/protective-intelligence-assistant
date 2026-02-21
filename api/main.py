@@ -238,9 +238,10 @@ def get_alert_score(
     alert_id: int,
     uncertainty: int = Query(default=0, ge=0, le=1),
     n: int = Query(default=500, ge=100, le=5000),
+    force: int = Query(default=0, ge=0, le=1),
 ):
     """Get the score breakdown for a specific alert, including Monte Carlo interval stats."""
-    from analytics.risk_scoring import compute_uncertainty_for_alert
+    from analytics.uncertainty import compute_uncertainty_for_alert
 
     conn = get_connection()
     score = conn.execute(
@@ -254,11 +255,13 @@ def get_alert_score(
     conn.close()
 
     payload = dict(score)
-    for field in ("mc_mean", "mc_p05", "mc_p50", "mc_p95", "mc_std"):
-        payload.setdefault(field, None)
     if uncertainty == 1:
         try:
-            payload["uncertainty"] = compute_uncertainty_for_alert(alert_id=alert_id, n=n)
+            payload["uncertainty"] = compute_uncertainty_for_alert(
+                alert_id=alert_id,
+                n=n,
+                force=bool(force),
+            )
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
     return payload

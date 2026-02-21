@@ -348,13 +348,17 @@ with tab_alerts:
 
                     # Score breakdown
                     try:
-                        score_data = requests.get(f"{API_URL}/alerts/{alert['id']}/score").json()
+                        score_data = requests.get(
+                            f"{API_URL}/alerts/{alert['id']}/score",
+                            params={"uncertainty": 1, "n": 500},
+                        ).json()
                         if "keyword_weight" in score_data:
-                            if score_data.get("mc_p05") is not None and score_data.get("mc_p95") is not None:
+                            interval = score_data.get("uncertainty") or {}
+                            if interval.get("p05") is not None and interval.get("p95") is not None:
                                 score_center = score_data.get("final_score", score)
                                 st.markdown(
                                     f"**Risk Score:** {score_center:.1f} "
-                                    f"(p05={score_data['mc_p05']:.1f} / p95={score_data['mc_p95']:.1f})"
+                                    f"(p05={interval['p05']:.1f} / p95={interval['p95']:.1f})"
                                 )
                             st.markdown("**Score Breakdown:**")
                             sc1, sc2, sc3, sc4, sc5 = st.columns(5)
@@ -365,12 +369,12 @@ with tab_alerts:
                             sc3.metric("Frequency Factor", f"{score_data['frequency_factor']:.1f}x")
                             sc4.metric("Z-Score", f"{score_data.get('z_score', 0):.2f}")
                             sc5.metric("Recency Factor", f"{score_data['recency_factor']:.2f}")
-                            if score_data.get("mc_p05") is not None:
+                            if interval.get("p05") is not None:
                                 uc1, uc2, uc3, uc4 = st.columns(4)
-                                uc1.metric("MC P05", f"{score_data['mc_p05']:.1f}")
-                                uc2.metric("MC P50", f"{score_data['mc_p50']:.1f}")
-                                uc3.metric("MC P95", f"{score_data['mc_p95']:.1f}")
-                                uc4.metric("MC Std", f"{score_data['mc_std']:.2f}")
+                                uc1.metric("MC P05", f"{interval['p05']:.1f}")
+                                uc2.metric("MC P50", f"{interval['p50']:.1f}")
+                                uc3.metric("MC P95", f"{interval['p95']:.1f}")
+                                uc4.metric("MC Std", f"{interval['std']:.2f}")
                     except Exception:
                         pass
 
